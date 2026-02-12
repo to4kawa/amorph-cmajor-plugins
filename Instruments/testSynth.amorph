@@ -1,0 +1,1206 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="testSynth" date="2026-02-12T00:21:25.473+01:00">
+  <PresentationConfig title="Poly FFT Synth" paramCount="9" highlightColour="ffff466e"
+                      backgroundColour="ff1e1e1e" autoGenerateUiCode="0" uiScale="1.0"
+                      labWidth="1020" labHeight="750" presentationWidth="952" presentationHeight="823">
+    <ParameterNames>
+      <Param index="0" name="Cutoff"/>
+      <Param index="1" name="Resonance"/>
+      <Param index="2" name="Attack"/>
+      <Param index="3" name="Release"/>
+      <Param index="4" name="Detune"/>
+      <Param index="5" name="Drive"/>
+      <Param index="6" name="Spread"/>
+      <Param index="7" name="Volume"/>
+      <Param index="8" name="Waveform"/>
+      <Param index="9" name="Param 10"/>
+      <Param index="10" name="Param 11"/>
+      <Param index="11" name="Param 12"/>
+      <Param index="12" name="Param 13"/>
+      <Param index="13" name="Param 14"/>
+      <Param index="14" name="Param 15"/>
+      <Param index="15" name="Param 16"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>processor AmorphPolyFFTSynth
+{
+    output stream float&lt;2&gt; out;
+    input event std::midi::Message midiIn;
+
+    input event float param1 [[ name: &quot;Cutoff&quot;,    min: 80.0,   max: 12000.0, init: 2400.0, unit: &quot;Hz&quot; ]];
+    input event float param2 [[ name: &quot;Resonance&quot;, min: 0.5,    max: 10.0,    init: 1.8 ]];
+    input event float param3 [[ name: &quot;Attack&quot;,    min: 0.001,  max: 1.0,     init: 0.02,   unit: &quot;s&quot; ]];
+    input event float param4 [[ name: &quot;Release&quot;,   min: 0.02,   max: 3.0,     init: 0.45,   unit: &quot;s&quot; ]];
+    input event float param5 [[ name: &quot;Detune&quot;,    min: 0.0,    max: 50.0,    init: 8.0,    unit: &quot;ct&quot; ]];
+    input event float param6 [[ name: &quot;Drive&quot;,     min: 0.0,    max: 1.0,     init: 0.25 ]];
+    input event float param7 [[ name: &quot;Spread&quot;,    min: 0.0,    max: 1.0,     init: 0.55 ]];
+    input event float param8 [[ name: &quot;Volume&quot;,    min: 0.0,    max: 1.0,     init: 0.7 ]];
+    input event float param9 [[ name: &quot;Waveform&quot;,  min: 0.0,    max: 3.0,     init: 1.0 ]];
+
+    float cutoffValue = 2400.0f;
+    float resonanceValue = 1.8f;
+    float attackValue = 0.02f;
+    float releaseValue = 0.45f;
+    float detuneValue = 8.0f;
+    float driveValue = 0.25f;
+    float spreadValue = 0.55f;
+    float volumeValue = 0.7f;
+    float waveformValue = 1.0f;
+
+    event param1 (float v) { cutoffValue = v; }
+    event param2 (float v) { resonanceValue = v; }
+    event param3 (float v) { attackValue = v; }
+    event param4 (float v) { releaseValue = v; }
+    event param5 (float v) { detuneValue = v; }
+    event param6 (float v) { driveValue = v; }
+    event param7 (float v) { spreadValue = v; }
+    event param8 (float v) { volumeValue = v; }
+    event param9 (float v) { waveformValue = v &lt; 0.0f ? 0.0f : (v &gt; 3.0f ? 3.0f : v); }
+
+    struct Voice
+    {
+        float frequency;
+        float velocity;
+        float envelope;
+        float64 phaseA;
+        float64 phaseB;
+        float s1;
+        float s2;
+        float pan;
+        int noteNumber;
+        bool gate;
+        bool active;
+    }
+
+    Voice[12] voices;
+
+    float clamp (float x, float lo, float hi)
+    {
+        return x &lt; lo ? lo : (x &gt; hi ? hi : x);
+    }
+
+    float noteDetuneRatio (float cents)
+    {
+        return float (pow (float64 (2.0), float64 (cents) / 1200.0));
+    }
+
+    float softClip (float x, float amount)
+    {
+        float a = 1.0f + amount * 8.0f;
+        return float (tanh (float64 (x * a)) / tanh (float64 (a)));
+    }
+
+    float oscWave (float phase, int waveform)
+    {
+        if (waveform &lt;= 0)
+            return float (sin (2.0f * float (pi) * phase));
+
+        if (waveform == 1)
+            return phase * 2.0f - 1.0f;
+
+        if (waveform == 2)
+            return phase &lt; 0.5f ? 1.0f : -1.0f;
+
+        return 1.0f - abs (phase * 4.0f - 2.0f);
+    }
+
+    int findVoiceForNoteOn()
+    {
+        for (int i = 0; i &lt; 12; ++i)
+            if (! voices.at(i).active || voices.at(i).envelope &lt; 0.0005f)
+                return i;
+
+        int oldest = 0;
+        float quietest = voices.at(0).envelope;
+        for (int i = 1; i &lt; 12; ++i)
+        {
+            if (voices.at(i).envelope &lt; quietest)
+            {
+                quietest = voices.at(i).envelope;
+                oldest = i;
+            }
+        }
+
+        return oldest;
+    }
+
+    event midiIn (std::midi::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            int idx = findVoiceForNoteOn();
+            float baseFreq = std::notes::noteToFrequency (m.getNoteNumber());
+
+            voices.at(idx).noteNumber = m.getNoteNumber();
+            voices.at(idx).frequency = baseFreq;
+            voices.at(idx).velocity = m.getVelocity() / 127.0f;
+            voices.at(idx).envelope = 0.0f;
+            voices.at(idx).phaseA = 0.0;
+            voices.at(idx).phaseB = 0.0;
+            voices.at(idx).s1 = 0.0f;
+            voices.at(idx).s2 = 0.0f;
+            voices.at(idx).gate = true;
+            voices.at(idx).active = true;
+
+            float evenOdd = (idx &amp; 1) == 0 ? -1.0f : 1.0f;
+            float pairPos = float ((idx % 6)) / 5.0f;
+            voices.at(idx).pan = evenOdd * pairPos;
+        }
+
+        if (m.isNoteOff())
+        {
+            for (int i = 0; i &lt; 12; ++i)
+            {
+                if (voices.at(i).active &amp;&amp; voices.at(i).noteNumber == m.getNoteNumber())
+                    voices.at(i).gate = false;
+            }
+        }
+    }
+
+    void main()
+    {
+        loop
+        {
+            float left = 0.0f;
+            float right = 0.0f;
+            float sr = float (processor.frequency);
+            float dt = float (processor.period);
+
+            float attackStep = 1.0f / clamp (attackValue * sr, 1.0f, 200000.0f);
+            float releaseMul = float (exp (-float64 (dt) / float64 (clamp (releaseValue, 0.001f, 10.0f))));
+            float detuneRatio = noteDetuneRatio (detuneValue);
+            float q = clamp (resonanceValue, 0.55f, 12.0f);
+            int waveformIndex = int (waveformValue + 0.5f);
+            if (waveformIndex &lt; 0) waveformIndex = 0;
+            if (waveformIndex &gt; 3) waveformIndex = 3;
+
+            for (int i = 0; i &lt; 12; ++i)
+            {
+                if (! voices.at(i).active)
+                    continue;
+
+                if (voices.at(i).gate)
+                {
+                    voices.at(i).envelope += attackStep;
+                    if (voices.at(i).envelope &gt; 1.0f)
+                        voices.at(i).envelope = 1.0f;
+                }
+                else
+                {
+                    voices.at(i).envelope *= releaseMul;
+                    if (voices.at(i).envelope &lt; 0.00005f)
+                    {
+                        voices.at(i).active = false;
+                        continue;
+                    }
+                }
+
+                float phaseA = float (voices.at(i).phaseA);
+                float phaseB = float (voices.at(i).phaseB);
+
+                float oscA = oscWave (phaseA, waveformIndex);
+                float oscB = oscWave (phaseB, waveformIndex);
+                float osc = 0.5f * (oscA + oscB);
+
+                voices.at(i).phaseA += voices.at(i).frequency * dt;
+                voices.at(i).phaseB += (voices.at(i).frequency * detuneRatio) * dt;
+
+                if (voices.at(i).phaseA &gt;= 1.0)
+                    voices.at(i).phaseA -= 1.0;
+                if (voices.at(i).phaseB &gt;= 1.0)
+                    voices.at(i).phaseB -= 1.0;
+
+                float envCut = cutoffValue * (0.35f + 0.85f * voices.at(i).envelope);
+                float currentCut = clamp (envCut, 40.0f, 18000.0f);
+
+                float g = float (tan (float (pi) * currentCut * dt));
+                float k = 1.0f / q;
+                float h = 1.0f / (1.0f + g * (g + k));
+
+                float hp = (osc - voices.at(i).s1 * (g + k) - voices.at(i).s2) * h;
+                float bp = g * hp + voices.at(i).s1;
+                voices.at(i).s1 = g * hp + bp;
+                float lp = g * bp + voices.at(i).s2;
+                voices.at(i).s2 = g * bp + lp;
+
+                float v = lp * voices.at(i).envelope * voices.at(i).velocity;
+                v = softClip (v, driveValue);
+
+                float pan = clamp (voices.at(i).pan * spreadValue, -1.0f, 1.0f);
+                float leftGain = 0.5f * (1.0f - pan);
+                float rightGain = 0.5f * (1.0f + pan);
+
+                left += v * leftGain;
+                right += v * rightGain;
+            }
+
+            float outGain = volumeValue * 0.35f;
+            out &lt;- float&lt;2&gt; (left * outGain, right * outGain);
+            advance();
+        }
+    }
+}
+</Code>
+  <UICode>
+class KnobControl
+{
+    constructor (options)
+    {
+        this.patchConnection = options.patchConnection;
+        this.param = options.param;
+        this.knob = options.knob;
+        this.valueLabel = options.valueLabel;
+        this.formatValue = options.formatValue;
+        this.min = options.min;
+        this.max = options.max;
+        this.step = options.step;
+        this.defaultValue = options.defaultValue;
+
+        this.value = this.defaultValue;
+        this.dragging = false;
+        this.startY = 0;
+        this.startValue = this.value;
+
+        this.knob.addEventListener(&quot;pointerdown&quot;, (e) =&gt; this.onPointerDown(e));
+        this.knob.addEventListener(&quot;pointermove&quot;, (e) =&gt; this.onPointerMove(e));
+        this.knob.addEventListener(&quot;pointerup&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;pointercancel&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;dblclick&quot;, () =&gt; this.setValue(this.defaultValue, true));
+
+        this.updateVisuals();
+        if (this.valueLabel)
+            this.valueLabel.textContent = this.formatValue(this.param, this.value);
+    }
+
+    clamp (value, min, max)
+    {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    quantize (value)
+    {
+        if (!this.step || this.step &lt;= 0)
+            return value;
+
+        const q = Math.round((value - this.min) / this.step);
+        return this.min + q * this.step;
+    }
+
+    setValue (value, notify)
+    {
+        this.value = this.clamp(this.quantize(value), this.min, this.max);
+        this.updateVisuals();
+
+        if (this.valueLabel)
+            this.valueLabel.textContent = this.formatValue(this.param, this.value);
+
+        if (notify)
+            this.patchConnection.sendEventOrValue(this.param, this.value);
+    }
+
+    updateVisuals()
+    {
+        const norm = (this.value - this.min) / (this.max - this.min);
+        const angle = -135 + norm * 270;
+        this.knob.style.setProperty(&quot;--angle&quot;, &#96;${angle}deg&#96;);
+    }
+
+    onPointerDown (e)
+    {
+        this.dragging = true;
+        this.startY = e.clientY;
+        this.startValue = this.value;
+        this.knob.setPointerCapture(e.pointerId);
+    }
+
+    onPointerMove (e)
+    {
+        if (!this.dragging)
+            return;
+
+        const range = this.max - this.min;
+        const sensitivity = range / 240;
+        const fine = e.shiftKey ? 0.2 : 1.0;
+        const delta = this.startY - e.clientY;
+        this.setValue(this.startValue + delta * sensitivity * fine, true);
+    }
+
+    onPointerUp (e)
+    {
+        if (!this.dragging)
+            return;
+
+        this.dragging = false;
+        this.knob.releasePointerCapture(e.pointerId);
+    }
+}
+
+class FFTAnalyzer
+{
+    constructor (fftSize, displayBins)
+    {
+        this.fftSize = fftSize;
+        this.displayBins = displayBins;
+        this.sampleRate = 48000;
+
+        this.bufferSize = fftSize * 4;
+        this.ring = new Float32Array(this.bufferSize);
+        this.writePos = 0;
+        this.filled = 0;
+
+        this.window = new Float32Array(fftSize);
+        this.re = new Float32Array(fftSize);
+        this.im = new Float32Array(fftSize);
+        this.bitrev = new Uint32Array(fftSize);
+        this.cos = new Float32Array(fftSize / 2);
+        this.sin = new Float32Array(fftSize / 2);
+
+        this.spectrumDb = new Float32Array(displayBins);
+        this.rawDb = new Float32Array(displayBins);
+        this.spectrumReady = false;
+
+        const bits = Math.log2(fftSize);
+        for (let i = 0; i &lt; fftSize; ++i)
+        {
+            this.window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (fftSize - 1));
+
+            let x = i;
+            let y = 0;
+            for (let b = 0; b &lt; bits; ++b)
+            {
+                y = (y &lt;&lt; 1) | (x &amp; 1);
+                x &gt;&gt;= 1;
+            }
+            this.bitrev[i] = y;
+        }
+
+        for (let k = 0; k &lt; fftSize / 2; ++k)
+        {
+            const ph = -2 * Math.PI * k / fftSize;
+            this.cos[k] = Math.cos(ph);
+            this.sin[k] = Math.sin(ph);
+        }
+    }
+
+    pushSample (s)
+    {
+        this.ring[this.writePos] = s;
+        this.writePos = (this.writePos + 1) % this.bufferSize;
+        if (this.filled &lt; this.bufferSize)
+            this.filled++;
+    }
+
+    updateSampleRateFromChunk (chunk)
+    {
+        if (chunk &amp;&amp; typeof chunk.sampleRate === &quot;number&quot; &amp;&amp; chunk.sampleRate &gt; 1000)
+            this.sampleRate = chunk.sampleRate;
+    }
+
+    extractChannels (chunk)
+    {
+        if (!chunk)
+            return null;
+
+        const isView = (x) =&gt; ArrayBuffer.isView(x);
+
+        if (chunk.data)
+        {
+            if (Array.isArray(chunk.data))
+            {
+                if (chunk.data.length &gt; 0 &amp;&amp; (Array.isArray(chunk.data[0]) || isView(chunk.data[0])))
+                    return chunk.data;
+                if (chunk.data.length &gt; 0 &amp;&amp; typeof chunk.data[0] === &quot;number&quot;)
+                    return [chunk.data];
+            }
+
+            if (isView(chunk.data))
+                return [chunk.data];
+        }
+
+        if (chunk.samples)
+        {
+            if (Array.isArray(chunk.samples) &amp;&amp; chunk.samples.length &gt; 0)
+                return Array.isArray(chunk.samples[0]) || isView(chunk.samples[0])
+                    ? chunk.samples
+                    : [chunk.samples];
+            if (isView(chunk.samples))
+                return [chunk.samples];
+        }
+
+        if (Array.isArray(chunk))
+        {
+            if (chunk.length &gt; 0 &amp;&amp; (Array.isArray(chunk[0]) || isView(chunk[0])))
+                return chunk;
+            if (chunk.length &gt; 0 &amp;&amp; typeof chunk[0] === &quot;number&quot;)
+                return [chunk];
+        }
+
+        if (isView(chunk))
+            return [chunk];
+
+        return null;
+    }
+
+    pushChunk (chunk)
+    {
+        this.updateSampleRateFromChunk(chunk);
+
+        const channels = this.extractChannels(chunk);
+        if (!channels || channels.length === 0)
+            return false;
+
+        const left = channels[0] || [];
+        const right = channels[1] || left;
+        const n = Math.min(left.length || 0, right.length || 0);
+
+        if (n &lt;= 0)
+            return false;
+
+        for (let i = 0; i &lt; n; ++i)
+            this.pushSample(0.5 * (left[i] + right[i]));
+
+        return true;
+    }
+
+    hasFrame ()
+    {
+        return this.filled &gt;= this.fftSize;
+    }
+
+    copyLatestFrame ()
+    {
+        const frame = new Float32Array(this.fftSize);
+        let readPos = (this.writePos - this.fftSize + this.bufferSize) % this.bufferSize;
+
+        for (let i = 0; i &lt; this.fftSize; ++i)
+        {
+            frame[i] = this.ring[readPos];
+            readPos = (readPos + 1) % this.bufferSize;
+        }
+
+        return frame;
+    }
+
+    fftInPlace ()
+    {
+        const N = this.fftSize;
+
+        for (let i = 0; i &lt; N; ++i)
+        {
+            const j = this.bitrev[i];
+            if (j &gt; i)
+            {
+                const tr = this.re[i];
+                const ti = this.im[i];
+                this.re[i] = this.re[j];
+                this.im[i] = this.im[j];
+                this.re[j] = tr;
+                this.im[j] = ti;
+            }
+        }
+
+        for (let size = 2; size &lt;= N; size &lt;&lt;= 1)
+        {
+            const half = size &gt;&gt; 1;
+            const step = N / size;
+
+            for (let i = 0; i &lt; N; i += size)
+            {
+                for (let j = 0; j &lt; half; ++j)
+                {
+                    const k = j * step;
+                    const wr = this.cos[k];
+                    const wi = this.sin[k];
+
+                    const xr = this.re[i + j + half];
+                    const xi = this.im[i + j + half];
+
+                    const tr = xr * wr - xi * wi;
+                    const ti = xr * wi + xi * wr;
+
+                    const ur = this.re[i + j];
+                    const ui = this.im[i + j];
+
+                    this.re[i + j] = ur + tr;
+                    this.im[i + j] = ui + ti;
+                    this.re[i + j + half] = ur - tr;
+                    this.im[i + j + half] = ui - ti;
+                }
+            }
+        }
+    }
+
+    compute ()
+    {
+        if (!this.hasFrame())
+            return false;
+
+        const frame = this.copyLatestFrame();
+
+        for (let i = 0; i &lt; this.fftSize; ++i)
+        {
+            this.re[i] = frame[i] * this.window[i];
+            this.im[i] = 0.0;
+        }
+
+        this.fftInPlace();
+
+        const nyquistBin = this.fftSize &gt;&gt; 1;
+        const minHz = 20.0;
+        const maxHz = Math.min(20000.0, this.sampleRate * 0.5);
+        const minDb = -110.0;
+
+        for (let i = 0; i &lt; this.displayBins; ++i)
+        {
+            const t = i / Math.max(1, this.displayBins - 1);
+            const hz = minHz * Math.pow(maxHz / minHz, t);
+            let bin = Math.round((hz / this.sampleRate) * this.fftSize);
+            bin = Math.max(1, Math.min(nyquistBin - 1, bin));
+
+            const mag = Math.sqrt(this.re[bin] * this.re[bin] + this.im[bin] * this.im[bin]);
+            const db = 20.0 * Math.log10((mag / this.fftSize) + 1.0e-12);
+            this.rawDb[i] = Math.max(minDb, db);
+        }
+
+        for (let i = 0; i &lt; this.displayBins; ++i)
+        {
+            const prevIndex = i &gt; 0 ? i - 1 : i;
+            const nextIndex = i &lt; this.displayBins - 1 ? i + 1 : i;
+            const spatial = this.rawDb[prevIndex] * 0.22 + this.rawDb[i] * 0.56 + this.rawDb[nextIndex] * 0.22;
+
+            if (!this.spectrumReady)
+            {
+                this.spectrumDb[i] = spatial;
+            }
+            else
+            {
+                const prev = this.spectrumDb[i];
+                const alpha = spatial &gt; prev ? 0.26 : 0.09;
+                this.spectrumDb[i] = prev + (spatial - prev) * alpha;
+            }
+        }
+
+        this.spectrumReady = true;
+        return true;
+    }
+
+    getSpectrum ()
+    {
+        return this.spectrumDb;
+    }
+}
+
+class AmorphPatchView extends HTMLElement
+{
+    constructor (patchConnection)
+    {
+        super();
+        this.patchConnection = patchConnection;
+        this.className = &quot;amorph-root&quot;;
+        this.innerHTML = this.getHTML();
+
+        this.controls = new Map();
+        this.fft = new FFTAnalyzer(2048, 256);
+        this.canvasW = 0;
+        this.canvasH = 0;
+
+        this.inputPeak = 0.0;
+        this.smoothedPeak = 0.0;
+        this.receivedRawAudio = false;
+        this.waveformValue = 1;
+        this.waveformButtons = [];
+        this.waveValue = null;
+
+        this.frame = null;
+    }
+
+    connectedCallback()
+    {
+        this.spectrumCanvas = this.querySelector(&quot;#spectrum&quot;);
+        this.ctx = this.spectrumCanvas.getContext(&quot;2d&quot;);
+        this.peakValue = this.querySelector(&quot;#peakValue&quot;);
+        this.statusValue = this.querySelector(&quot;#statusValue&quot;);
+        this.waveValue = this.querySelector(&quot;#waveValue&quot;);
+
+        this.setupControls();
+        this.setupWaveSelector();
+        this.setupListeners();
+        this.resizeCanvas();
+        this._resizeHandler = () =&gt; this.resizeCanvas();
+        window.addEventListener(&quot;resize&quot;, this._resizeHandler);
+
+        this.animate();
+    }
+
+    disconnectedCallback()
+    {
+        if (this.paramListener)
+            this.patchConnection.removeAllParameterListener(this.paramListener);
+        if (this.outputListener)
+            this.patchConnection.removeEndpointListener(&quot;out&quot;, this.outputListener);
+        if (this.frame)
+            cancelAnimationFrame(this.frame);
+        if (this._resizeHandler)
+            window.removeEventListener(&quot;resize&quot;, this._resizeHandler);
+    }
+
+    setupControls ()
+    {
+        const nodes = this.querySelectorAll(&quot;.control&quot;);
+        nodes.forEach((node) =&gt;
+        {
+            const param = node.dataset.param;
+            const control = new KnobControl({
+                patchConnection: this.patchConnection,
+                param,
+                knob: node.querySelector(&quot;.knob&quot;),
+                valueLabel: node.querySelector(&quot;.control-value&quot;),
+                min: Number(node.dataset.min),
+                max: Number(node.dataset.max),
+                step: Number(node.dataset.step),
+                defaultValue: Number(node.dataset.init),
+                formatValue: (id, v) =&gt; this.formatValue(id, v)
+            });
+
+            this.controls.set(param, control);
+            this.patchConnection.requestParameterValue(param);
+        });
+    }
+
+    clampWaveform (value)
+    {
+        return Math.max(0, Math.min(3, Math.round(value)));
+    }
+
+    waveformName (value)
+    {
+        switch (this.clampWaveform(value))
+        {
+            case 0: return &quot;Sine&quot;;
+            case 1: return &quot;Saw&quot;;
+            case 2: return &quot;Square&quot;;
+            case 3: return &quot;Triangle&quot;;
+            default: return &quot;Saw&quot;;
+        }
+    }
+
+    setWaveform (value, notify)
+    {
+        this.waveformValue = this.clampWaveform(value);
+
+        for (const button of this.waveformButtons)
+        {
+            const isActive = Number(button.dataset.wave) === this.waveformValue;
+            button.classList.toggle(&quot;is-active&quot;, isActive);
+        }
+
+        if (this.waveValue)
+            this.waveValue.textContent = this.waveformName(this.waveformValue);
+
+        if (notify)
+            this.patchConnection.sendEventOrValue(&quot;param9&quot;, this.waveformValue);
+    }
+
+    setupWaveSelector ()
+    {
+        this.waveformButtons = Array.from(this.querySelectorAll(&quot;.wave-btn&quot;));
+        for (const button of this.waveformButtons)
+        {
+            button.addEventListener(&quot;click&quot;, () =&gt;
+            {
+                this.setWaveform(Number(button.dataset.wave), true);
+            });
+        }
+
+        this.setWaveform(this.waveformValue, false);
+        this.patchConnection.requestParameterValue(&quot;param9&quot;);
+    }
+
+    setupListeners ()
+    {
+        this.paramListener = (event) =&gt;
+        {
+            if (event.endpointID === &quot;param9&quot;)
+            {
+                this.setWaveform(Number(event.value), false);
+                return;
+            }
+
+            const control = this.controls.get(event.endpointID);
+            if (!control)
+                return;
+            control.setValue(Number(event.value), false);
+        };
+        this.patchConnection.addAllParameterListener(this.paramListener);
+
+        this.outputListener = (chunk) =&gt;
+        {
+            const hadSamples = this.fft.pushChunk(chunk);
+            if (hadSamples)
+                this.receivedRawAudio = true;
+
+            if (chunk &amp;&amp; chunk.max &amp;&amp; chunk.min)
+            {
+                const maxL = Math.abs(chunk.max[0] || 0);
+                const maxR = Math.abs(chunk.max[1] || 0);
+                const minL = Math.abs(chunk.min[0] || 0);
+                const minR = Math.abs(chunk.min[1] || 0);
+                this.inputPeak = Math.max(this.inputPeak, maxL, maxR, minL, minR);
+            }
+        };
+
+        // Request raw audio chunks from output endpoint for real FFT analysis.
+        this.patchConnection.addEndpointListener(&quot;out&quot;, this.outputListener, 2048, true);
+    }
+
+    resizeCanvas ()
+    {
+        if (!this.spectrumCanvas || !this.ctx)
+            return;
+
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const rect = this.spectrumCanvas.getBoundingClientRect();
+        this.canvasW = Math.max(1, Math.floor(rect.width));
+        this.canvasH = Math.max(1, Math.floor(rect.height));
+
+        this.spectrumCanvas.width = Math.max(1, Math.floor(this.canvasW * dpr));
+        this.spectrumCanvas.height = Math.max(1, Math.floor(this.canvasH * dpr));
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    drawGrid ()
+    {
+        if (!this.ctx)
+            return;
+
+        const ctx = this.ctx;
+        const w = this.canvasW;
+        const h = this.canvasH;
+
+        ctx.clearRect(0, 0, w, h);
+
+        ctx.strokeStyle = &quot;rgba(255,255,255,0.10)&quot;;
+        ctx.lineWidth = 1;
+
+        for (let i = 1; i &lt; 5; ++i)
+        {
+            const y = (h * i) / 5;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
+            ctx.stroke();
+        }
+
+        const hzMarks = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+        const minHz = 20;
+        const maxHz = 20000;
+        ctx.fillStyle = &quot;rgba(255,255,255,0.40)&quot;;
+        ctx.font = &quot;10px Space Grotesk, sans-serif&quot;;
+
+        for (const hz of hzMarks)
+        {
+            const t = Math.log(hz / minHz) / Math.log(maxHz / minHz);
+            const x = t * w;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, h);
+            ctx.strokeStyle = &quot;rgba(255,255,255,0.06)&quot;;
+            ctx.stroke();
+
+            const label = hz &gt;= 1000 ? &#96;${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)}k&#96; : &#96;${hz}&#96;;
+            ctx.fillText(label, Math.min(w - 20, x + 2), h - 4);
+        }
+    }
+
+    drawSpectrum ()
+    {
+        if (!this.ctx)
+            return;
+
+        this.drawGrid();
+
+        if (!this.fft.spectrumReady)
+            return;
+
+        const ctx = this.ctx;
+        const w = this.canvasW;
+        const h = this.canvasH;
+
+        const bins = this.fft.getSpectrum();
+        const minDb = -110;
+        const maxDb = -12;
+
+        const points = new Array(bins.length);
+        for (let i = 0; i &lt; bins.length; ++i)
+        {
+            const x = (i / Math.max(1, bins.length - 1)) * w;
+            const norm = Math.max(0, Math.min(1, (bins[i] - minDb) / (maxDb - minDb)));
+            const y = h - norm * h;
+            points[i] = { x, y };
+        }
+
+        if (points.length &lt; 2)
+            return;
+
+        const line = new Path2D();
+        const fill = new Path2D();
+
+        line.moveTo(points[0].x, points[0].y);
+        fill.moveTo(points[0].x, h);
+        fill.lineTo(points[0].x, points[0].y);
+
+        for (let i = 1; i &lt; points.length - 1; ++i)
+        {
+            const midX = 0.5 * (points[i].x + points[i + 1].x);
+            const midY = 0.5 * (points[i].y + points[i + 1].y);
+            line.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+            fill.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+        }
+
+        const last = points[points.length - 1];
+        line.lineTo(last.x, last.y);
+        fill.lineTo(last.x, last.y);
+        fill.lineTo(last.x, h);
+        fill.closePath();
+
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0.0, &quot;rgba(255, 204, 122, 0.52)&quot;);
+        grad.addColorStop(0.45, &quot;rgba(255, 129, 128, 0.34)&quot;);
+        grad.addColorStop(1.0, &quot;rgba(255, 101, 132, 0.07)&quot;);
+
+        ctx.fillStyle = grad;
+        ctx.fill(fill);
+
+        ctx.save();
+        ctx.globalCompositeOperation = &quot;lighter&quot;;
+        ctx.shadowColor = &quot;rgba(255, 182, 98, 0.82)&quot;;
+        ctx.shadowBlur = 24;
+        ctx.strokeStyle = &quot;rgba(255, 199, 120, 0.74)&quot;;
+        ctx.lineWidth = 3.4;
+        ctx.stroke(line);
+        ctx.restore();
+
+        ctx.strokeStyle = &quot;rgba(255, 243, 190, 0.98)&quot;;
+        ctx.lineWidth = 1.7;
+        ctx.stroke(line);
+    }
+
+    animate ()
+    {
+        const tick = () =&gt;
+        {
+            this.fft.compute();
+
+            this.smoothedPeak = this.smoothedPeak * 0.90 + this.inputPeak * 0.10;
+            this.inputPeak *= 0.62;
+
+            const db = 20 * Math.log10(Math.max(this.smoothedPeak, 1.0e-9));
+            if (this.peakValue)
+                this.peakValue.textContent = &#96;${db.toFixed(1)} dBFS&#96;;
+
+            if (this.statusValue)
+                this.statusValue.textContent = this.receivedRawAudio ? &quot;Live FFT&quot; : &quot;Waiting for audio frames&quot;;
+
+            this.drawSpectrum();
+            this.frame = requestAnimationFrame(tick);
+        };
+
+        this.frame = requestAnimationFrame(tick);
+    }
+
+    formatValue (id, v)
+    {
+        switch (id)
+        {
+            case &quot;param1&quot;: return &#96;${Math.round(v)} Hz&#96;;
+            case &quot;param2&quot;: return v.toFixed(2);
+            case &quot;param3&quot;: return &#96;${(v * 1000).toFixed(1)} ms&#96;;
+            case &quot;param4&quot;: return &#96;${(v * 1000).toFixed(0)} ms&#96;;
+            case &quot;param5&quot;: return &#96;${v.toFixed(1)} ct&#96;;
+            case &quot;param6&quot;: return &#96;${Math.round(v * 100)}%&#96;;
+            case &quot;param7&quot;: return &#96;${Math.round(v * 100)}%&#96;;
+            case &quot;param8&quot;: return &#96;${Math.round(v * 100)}%&#96;;
+            case &quot;param9&quot;: return this.waveformName(v);
+            default: return v.toFixed(2);
+        }
+    }
+
+    getHTML ()
+    {
+        return &#96;
+        &lt;style&gt;
+            :root {
+                --bg: #121114;
+                --panel: rgba(30, 29, 36, 0.95);
+                --border: rgba(255, 255, 255, 0.09);
+                --text: #f2f2f7;
+                --muted: #a9a9b5;
+                --accent: #ff6584;
+                --accent2: #ffbc60;
+            }
+
+            .amorph-root {
+                width: 100%;
+                height: 100%;
+                box-sizing: border-box;
+                padding: 18px;
+                background: radial-gradient(1200px 500px at 10% 0%, #262232, var(--bg));
+                color: var(--text);
+                font-family: &quot;Space Grotesk&quot;, &quot;Avenir Next&quot;, &quot;SF Pro Text&quot;, sans-serif;
+                display: grid;
+                grid-template-rows: auto 1fr auto auto;
+                gap: 14px;
+            }
+
+            .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                padding: 14px 16px;
+                border-radius: 14px;
+                background: var(--panel);
+                border: 1px solid var(--border);
+            }
+
+            .title {
+                font-size: 21px;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+            }
+
+            .subtitle {
+                font-size: 11px;
+                color: var(--muted);
+                letter-spacing: 0.24em;
+                text-transform: uppercase;
+            }
+
+            .meta {
+                text-align: right;
+            }
+
+            .peak {
+                font-size: 13px;
+                color: var(--accent2);
+                font-weight: 600;
+            }
+
+            .status {
+                font-size: 11px;
+                color: var(--muted);
+            }
+
+            .spectrum-wrap {
+                border-radius: 14px;
+                border: 1px solid var(--border);
+                background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.0));
+                padding: 10px;
+            }
+
+            #spectrum {
+                width: 100%;
+                height: 280px;
+                display: block;
+                border-radius: 10px;
+                background: rgba(8, 8, 12, 0.82);
+            }
+
+
+            .wave-panel {
+                border-radius: 14px;
+                border: 1px solid var(--border);
+                background: var(--panel);
+                padding: 10px 12px;
+                display: grid;
+                gap: 8px;
+            }
+
+            .wave-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .wave-label {
+                font-size: 11px;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.16em;
+            }
+
+            .wave-value {
+                font-size: 12px;
+                color: var(--accent2);
+                font-weight: 700;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+
+            .wave-buttons {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 8px;
+            }
+
+            .wave-btn {
+                appearance: none;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                background: rgba(255, 255, 255, 0.04);
+                color: var(--muted);
+                border-radius: 10px;
+                padding: 7px 0;
+                font-size: 11px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                cursor: pointer;
+                transition: border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+            }
+
+            .wave-btn:hover {
+                border-color: rgba(255, 188, 96, 0.45);
+                color: var(--text);
+            }
+
+            .wave-btn.is-active {
+                color: #fff5de;
+                border-color: rgba(255, 188, 96, 0.95);
+                background: linear-gradient(180deg, rgba(255, 188, 96, 0.34), rgba(255, 101, 132, 0.22));
+                box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15), 0 0 18px rgba(255, 188, 96, 0.34);
+            }
+
+            .controls {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(90px, 1fr));
+                gap: 10px;
+            }
+
+            @media (max-width: 880px) {
+                #spectrum { height: 230px; }
+                .controls { grid-template-columns: repeat(4, minmax(72px, 1fr)); }
+            }
+
+            @media (max-width: 640px) {
+                .header { flex-direction: column; align-items: flex-start; gap: 8px; }
+                .wave-head { flex-direction: column; align-items: flex-start; gap: 3px; }
+                .controls { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
+            }
+
+            .control {
+                padding: 10px 8px 12px;
+                border-radius: 12px;
+                border: 1px solid var(--border);
+                background: var(--panel);
+                display: grid;
+                justify-items: center;
+                gap: 7px;
+            }
+
+            .control-label {
+                font-size: 11px;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.14em;
+            }
+
+            .control-value {
+                font-size: 12px;
+                font-weight: 600;
+                color: var(--accent2);
+                min-height: 16px;
+            }
+
+            .knob {
+                --angle: 0deg;
+                width: 62px;
+                height: 62px;
+                border-radius: 50%;
+                background: radial-gradient(circle at 32% 24%, #3a3742, #1b1a21 70%);
+                border: 1px solid rgba(255,255,255,0.16);
+                position: relative;
+                touch-action: none;
+                cursor: ns-resize;
+            }
+
+            .knob::after {
+                content: &quot;&quot;;
+                position: absolute;
+                left: 50%;
+                top: 8px;
+                width: 3px;
+                height: 20px;
+                background: linear-gradient(180deg, var(--accent2), var(--accent));
+                transform: translateX(-50%) rotate(var(--angle));
+                transform-origin: 50% 23px;
+                border-radius: 2px;
+                box-shadow: 0 0 8px rgba(255, 188, 96, 0.4);
+            }
+        &lt;/style&gt;
+
+        &lt;div class=&quot;header&quot;&gt;
+            &lt;div&gt;
+                &lt;div class=&quot;title&quot;&gt;AMORPH POLY&lt;/div&gt;
+                &lt;div class=&quot;subtitle&quot;&gt;Poly Synth + Output Spectrum Analyzer&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;meta&quot;&gt;
+                &lt;div class=&quot;peak&quot; id=&quot;peakValue&quot;&gt;-inf dBFS&lt;/div&gt;
+                &lt;div class=&quot;status&quot; id=&quot;statusValue&quot;&gt;Waiting for audio frames&lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class=&quot;spectrum-wrap&quot;&gt;
+            &lt;canvas id=&quot;spectrum&quot;&gt;&lt;/canvas&gt;
+        &lt;/div&gt;
+
+        &lt;div class=&quot;wave-panel&quot;&gt;
+            &lt;div class=&quot;wave-head&quot;&gt;
+                &lt;div class=&quot;wave-label&quot;&gt;Waveform&lt;/div&gt;
+                &lt;div class=&quot;wave-value&quot; id=&quot;waveValue&quot;&gt;Saw&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;wave-buttons&quot;&gt;
+                &lt;button class=&quot;wave-btn&quot; type=&quot;button&quot; data-wave=&quot;0&quot;&gt;Sine&lt;/button&gt;
+                &lt;button class=&quot;wave-btn&quot; type=&quot;button&quot; data-wave=&quot;1&quot;&gt;Saw&lt;/button&gt;
+                &lt;button class=&quot;wave-btn&quot; type=&quot;button&quot; data-wave=&quot;2&quot;&gt;Square&lt;/button&gt;
+                &lt;button class=&quot;wave-btn&quot; type=&quot;button&quot; data-wave=&quot;3&quot;&gt;Triangle&lt;/button&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class=&quot;controls&quot;&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param1&quot; data-min=&quot;80&quot; data-max=&quot;12000&quot; data-step=&quot;1&quot; data-init=&quot;2400&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Cutoff&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param2&quot; data-min=&quot;0.5&quot; data-max=&quot;10&quot; data-step=&quot;0.01&quot; data-init=&quot;1.8&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Resonance&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param3&quot; data-min=&quot;0.001&quot; data-max=&quot;1&quot; data-step=&quot;0.001&quot; data-init=&quot;0.02&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Attack&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param4&quot; data-min=&quot;0.02&quot; data-max=&quot;3&quot; data-step=&quot;0.001&quot; data-init=&quot;0.45&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Release&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param5&quot; data-min=&quot;0&quot; data-max=&quot;50&quot; data-step=&quot;0.1&quot; data-init=&quot;8&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Detune&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param6&quot; data-min=&quot;0&quot; data-max=&quot;1&quot; data-step=&quot;0.01&quot; data-init=&quot;0.25&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Drive&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param7&quot; data-min=&quot;0&quot; data-max=&quot;1&quot; data-step=&quot;0.01&quot; data-init=&quot;0.55&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Spread&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;control&quot; data-param=&quot;param8&quot; data-min=&quot;0&quot; data-max=&quot;1&quot; data-step=&quot;0.01&quot; data-init=&quot;0.7&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;&lt;/div&gt;&lt;div class=&quot;control-label&quot;&gt;Volume&lt;/div&gt;&lt;div class=&quot;control-value&quot;&gt;&lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;&#96;;
+    }
+}
+
+export default function createPatchView (patchConnection)
+{
+    const name = &quot;amorph-poly-fft-ui&quot;;
+    if (!window.customElements.get(name))
+        window.customElements.define(name, AmorphPatchView);
+
+    return new (window.customElements.get(name)) (patchConnection);
+}
+</UICode>
+</AmorphAlgorithm>
