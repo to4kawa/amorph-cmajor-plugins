@@ -1,0 +1,1723 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="Dattoro Waterfall UI" date="2026-02-12T00:44:41.267+01:00">
+  <PresentationConfig title="Reverb Dattoro Style" author="Artists in DSP" paramCount="6"
+                      highlightColour="fff0aab9" backgroundColour="ff3a3131" autoGenerateUiCode="0"
+                      uiScale="1.0" labWidth="0" labHeight="0" presentationWidth="951"
+                      presentationHeight="468">
+    <ParameterNames>
+      <Param index="0" name="Mix"/>
+      <Param index="1" name="Decay"/>
+      <Param index="2" name="Size"/>
+      <Param index="3" name="Damping"/>
+      <Param index="4" name="PreDelay"/>
+      <Param index="5" name="Width"/>
+      <Param index="6" name="Param 7"/>
+      <Param index="7" name="Param 8"/>
+      <Param index="8" name="Param 9"/>
+      <Param index="9" name="Param 10"/>
+      <Param index="10" name="Param 11"/>
+      <Param index="11" name="Param 12"/>
+      <Param index="12" name="Param 13"/>
+      <Param index="13" name="Param 14"/>
+      <Param index="14" name="Param 15"/>
+      <Param index="15" name="Param 16"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>/*
+    Dattoro Plate Reverb - STEREO Cmajor Version (wide, mono-at-0, predelay init 0, inverted damping)
+    Clean safety: hard clip as last resort (no soft saturation limiter)
+
+    Parameters:
+    - param1: Mix (0..1)
+    - param2: Decay (0..1)
+    - param3: Size (0.25..2.0x)
+    - param4: Damping (0..1)  INVERTED internally
+    - param5: PreDelay (0..100 ms)   INIT = 0
+    - param6: Width (0..1)    0=MONO, 1=WIDE
+*/
+
+processor DattoroReverbStereo
+{
+    input  stream float&lt;2&gt; in;
+    output stream float&lt;2&gt; out;
+
+    // EXPOSED PARAMETERS
+    input event float param1 [[ name: &quot;Mix&quot;,      min: 0.0,  max: 1.0,   init: 0.5              ]];
+    input event float param2 [[ name: &quot;Decay&quot;,    min: 0.0,  max: 1.0,   init: 0.5              ]];
+    input event float param3 [[ name: &quot;Size&quot;,     min: 0.25, max: 2.0,   init: 1.0, unit: &quot;x&quot;   ]];
+    input event float param4 [[ name: &quot;Damping&quot;,  min: 0.0,  max: 1.0,   init: 0.5              ]];
+    input event float param5 [[ name: &quot;PreDelay&quot;, min: 0.0,  max: 100.0, init: 0.0, unit: &quot;ms&quot;  ]];
+    input event float param6 [[ name: &quot;Width&quot;,    min: 0.0,  max: 1.0,   init: 0.8              ]];
+
+    // --- helpers ---
+    float clamp (float x, float a, float b) { return x &lt; a ? a : (x &gt; b ? b : x); }
+    int   clampi (int x, int a, int b) { return x &lt; a ? a : (x &gt; b ? b : x); }
+    float absf (float x) { return x &lt; 0.0f ? -x : x; }
+
+    float hardClip (float x)
+    {
+        return x &lt; -1.0f ? -1.0f : (x &gt; 1.0f ? 1.0f : x);
+    }
+
+    // Parameters
+    float drywet     = 0.5f;
+    float decay      = 0.5f;
+    float size       = 1.0f;
+    float damping    = 0.5f;   // INTERNAL (already inverted in event)
+    float predelayMs = 0.0f;   // INIT 0
+    float width      = 0.8f;
+
+    // Smoothed size
+    float smoothedSize = 1.0f;
+
+    // Diffusion defaults
+    let indiffusion1     = 0.75f;
+    let indiffusion2     = 0.625f;
+    let decaydiffusion1  = 0.7f;
+    let decaydiffusion2  = 0.5f;
+    let inbandwidth      = 0.5f;
+
+    // Helper: read from delay with wrap
+    float readDelay&lt;ArrayType&gt; (ArrayType&amp; buffer, int writePos, int delaySamples)
+    {
+        let bufSize = buffer.size;
+        var d = delaySamples;
+        if (d &lt; 1) d = 1;
+        if (d &gt; bufSize - 1) d = bufSize - 1;
+
+        var readPos = writePos - d;
+        while (readPos &lt; 0) readPos += bufSize;
+        return buffer.at (readPos % bufSize);
+    }
+
+    // Helper: write to delay and advance
+    void writeDelay&lt;ArrayType&gt; (ArrayType&amp; buffer, int&amp; writePos, float value)
+    {
+        buffer.at (writePos) = value;
+        writePos = (writePos + 1) % buffer.size;
+    }
+
+    // ===== LEFT STATE =====
+    float[9600] predelayBufferL;
+    float[554]  delay2L;
+    float[758]  delay3L;
+    float[214]  delay4L;
+    float[284]  delay5L;
+    float[6326] delay6L;
+    float[8434] delay7L;
+    float[8906] delay8L;
+    float[3600] delay9L;
+    float[7440] delay10L;
+    float[7440] delay11L;
+    float[1848] delay12L;
+    float[1376] delay13L;
+
+    int preDelayWriteL = 0;
+    int write2L = 0,  write3L = 0,  write4L = 0,  write5L = 0;
+    int write6L = 0,  write7L = 0,  write8L = 0,  write9L = 0;
+    int write10L = 0, write11L = 0, write12L = 0, write13L = 0;
+
+    float history14L = 0.0f;
+    float history15L = 0.0f;
+    float history16L = 0.0f;
+
+    float lfoPhase1L = 0.0f;
+    float lfoPhase2L = 0.0f;
+
+    // ===== RIGHT STATE =====
+    float[9600] predelayBufferR;
+    float[554]  delay2R;
+    float[758]  delay3R;
+    float[214]  delay4R;
+    float[284]  delay5R;
+    float[6326] delay6R;
+    float[8434] delay7R;
+    float[8906] delay8R;
+    float[3600] delay9R;
+    float[7440] delay10R;
+    float[7440] delay11R;
+    float[1848] delay12R;
+    float[1376] delay13R;
+
+    int preDelayWriteR = 0;
+    int write2R = 0,  write3R = 0,  write4R = 0,  write5R = 0;
+    int write6R = 0,  write7R = 0,  write8R = 0,  write9R = 0;
+    int write10R = 0, write11R = 0, write12R = 0, write13R = 0;
+
+    float history14R = 0.0f;
+    float history15R = 0.0f;
+    float history16R = 0.0f;
+
+    // decorrelated start phases
+    float lfoPhase1R = 0.37f;
+    float lfoPhase2R = 0.61f;
+
+    // --- parameter events ---
+    event param1 (float v) { drywet = clamp (v, 0.0f, 1.0f); }
+    event param2 (float v) { decay  = clamp (v, 0.0f, 1.0f); }
+    event param3 (float v) { size   = clamp (v, 0.25f, 2.0f); }
+
+    // INVERT damping
+    event param4 (float v)
+    {
+        let t = clamp (v, 0.0f, 1.0f);
+        damping = 1.0f - t;
+    }
+
+    event param5 (float v) { predelayMs = clamp (v, 0.0f, 100.0f); }
+    event param6 (float v) { width      = clamp (v, 0.0f, 1.0f); }
+
+    void main()
+    {
+        loop
+        {
+            let inL = in[0];
+            let inR = in[1];
+
+            let sr = float (processor.frequency);
+
+            // predelay in samples (clamped to buffer)
+            let predelaySamps = clampi (int (predelayMs * 0.001f * sr), 0, 9599);
+
+            // smooth size
+            let smoothCoeff1 = 0.9995f;
+            smoothedSize = smoothedSize * smoothCoeff1 + size * (1.0f - smoothCoeff1);
+            let smoothCoeff2 = 0.9995f;
+            smoothedSize = smoothedSize * smoothCoeff2 + size * (1.0f - smoothCoeff2);
+
+            // =========================
+            // LEFT CHANNEL
+            // =========================
+
+            predelayBufferL.at (preDelayWriteL) = inL;
+            var rpL = preDelayWriteL - predelaySamps;
+            while (rpL &lt; 0) rpL += 9600;
+            let tap18L = predelayBufferL.at (rpL % 9600);
+            preDelayWriteL = (preDelayWriteL + 1) % 9600;
+
+            let mix19L = history16L + inbandwidth * (tap18L - history16L);
+            history16L = mix19L;
+
+            let tap20L = readDelay (delay2L, write2L, int (277.0f * smoothedSize));
+            let tap22L = readDelay (delay3L, write3L, int (379.0f * smoothedSize));
+            let tap24L = readDelay (delay4L, write4L, int (107.0f * smoothedSize));
+            let tap26L = readDelay (delay5L, write5L, int (142.0f * smoothedSize));
+
+            let sub28L = mix19L - (tap26L * indiffusion1);
+            let add30L = (sub28L * indiffusion1) + tap26L;
+
+            let sub31L = add30L - (tap24L * indiffusion1);
+            let add33L = (sub31L * indiffusion1) + tap24L;
+
+            let sub34L = add33L - (tap22L * indiffusion2);
+            let add36L = (sub34L * indiffusion2) + tap22L;
+
+            let sub37L = add36L - (tap20L * indiffusion2);
+            let add39L = (sub37L * indiffusion2) + tap20L;
+
+            let diffusedInputL = add39L;
+
+            let tap43L = readDelay (delay6L,  write6L,  int (3163.0f * smoothedSize));
+            let tap49L = readDelay (delay7L,  write7L,  int (4217.0f * smoothedSize));
+            let tap57L = readDelay (delay8L,  write8L,  int (4453.0f * smoothedSize));
+            let tap63L = readDelay (delay9L,  write9L,  int (1800.0f * smoothedSize));
+            let tap68L = readDelay (delay10L, write10L, int (3720.0f * smoothedSize));
+            let tap74L = readDelay (delay11L, write11L, int (3720.0f * smoothedSize));
+
+            let mix79L = history14L + damping * (tap57L - history14L);
+            let mix80L = history15L + damping * (tap49L - history15L);
+            history14L = mix79L;
+            history15L = mix80L;
+
+            let mul81L = tap63L * decaydiffusion2;
+            let mul82L = tap74L * decaydiffusion2;
+
+            let mul83L = mix79L * decay;
+            let sub84L = mul83L - mul81L;
+            let add86L = (sub84L * decaydiffusion2) + tap63L;
+
+            let mul87L = mix80L * decay;
+            let sub88L = mul87L - mul82L;
+            let add90L = (sub88L * decaydiffusion2) + tap74L;
+
+            lfoPhase1L += 0.07f / sr;
+            if (lfoPhase1L &gt;= 1.0f) lfoPhase1L -= 1.0f;
+            let lfo1L = sin (lfoPhase1L * float (twoPi));
+            let modDelay1L = int ((908.0f + lfo1L * 16.0f) * smoothedSize);
+
+            lfoPhase2L += 0.1f / sr;
+            if (lfoPhase2L &gt;= 1.0f) lfoPhase2L -= 1.0f;
+            let lfo2L = sin (lfoPhase2L * float (twoPi));
+            let modDelay2L = int ((672.0f + lfo2L * 16.0f) * smoothedSize);
+
+            let tap97L  = readDelay (delay12L, write12L, modDelay1L);
+            let tap108L = readDelay (delay13L, write13L, modDelay2L);
+
+            let mul91L = tap68L * decay;
+            let add92L = mul91L + diffusedInputL;
+            let add99L = add92L + (tap97L * decaydiffusion1);
+            let mul100L = add99L * decaydiffusion1;
+            let rsub101L = tap97L - mul100L;
+
+            let mul102L = tap43L * decay;
+            let add103L = diffusedInputL + mul102L;
+            let add110L = add103L + (tap108L * decaydiffusion1);
+            let mul111L = add110L * decaydiffusion1;
+            let rsub112L = tap108L - mul111L;
+
+            let tap44L = readDelay (delay6L, write6L, int (121.0f  * smoothedSize));
+            let tap45L = readDelay (delay6L, write6L, int (1996.0f * smoothedSize));
+            let tap50L = readDelay (delay7L, write7L, int (266.0f  * smoothedSize));
+            let tap51L = readDelay (delay7L, write7L, int (2974.0f * smoothedSize));
+            let tap52L = readDelay (delay7L, write7L, int (2111.0f * smoothedSize));
+
+            let tap58L = readDelay (delay8L, write8L, int (353.0f  * smoothedSize));
+            let tap59L = readDelay (delay8L, write8L, int (3627.0f * smoothedSize));
+            let tap60L = readDelay (delay8L, write8L, int (1990.0f * smoothedSize));
+            let tap64L = readDelay (delay9L, write9L, int (187.0f  * smoothedSize));
+            let tap65L = readDelay (delay9L, write9L, int (1228.0f * smoothedSize));
+
+            let tap69L = readDelay (delay10L, write10L, int (1066.0f * smoothedSize));
+            let tap70L = readDelay (delay10L, write10L, int (2673.0f * smoothedSize));
+            let tap75L = readDelay (delay11L, write11L, int (335.0f  * smoothedSize));
+            let tap76L = readDelay (delay11L, write11L, int (1913.0f * smoothedSize));
+
+            let leftOutL  = ((tap50L + tap51L) + tap45L + tap52L + tap75L + tap44L + tap65L + tap60L);
+            let rightOutL = ((tap70L + tap58L + tap59L) + tap76L + tap69L + tap64L);
+
+            let wetL_raw = (leftOutL - rightOutL) * 0.6f;
+
+            writeDelay (delay2L,  write2L,  sub37L);
+            writeDelay (delay3L,  write3L,  sub34L);
+            writeDelay (delay4L,  write4L,  sub31L);
+            writeDelay (delay5L,  write5L,  sub28L);
+            writeDelay (delay6L,  write6L,  add90L);
+            writeDelay (delay7L,  write7L,  rsub101L);
+            writeDelay (delay8L,  write8L,  rsub112L);
+            writeDelay (delay9L,  write9L,  sub84L);
+            writeDelay (delay10L, write10L, add86L);
+            writeDelay (delay11L, write11L, sub88L);
+            writeDelay (delay12L, write12L, add99L);
+            writeDelay (delay13L, write13L, add110L);
+
+            // =========================
+            // RIGHT CHANNEL (decorrelated)
+            // =========================
+
+            predelayBufferR.at (preDelayWriteR) = inR;
+            var rpR = preDelayWriteR - predelaySamps;
+            while (rpR &lt; 0) rpR += 9600;
+            let tap18R = predelayBufferR.at (rpR % 9600);
+            preDelayWriteR = (preDelayWriteR + 1) % 9600;
+
+            let mix19R = history16R + inbandwidth * (tap18R - history16R);
+            history16R = mix19R;
+
+            let tap20R = readDelay (delay2R, write2R, int (277.0f * smoothedSize));
+            let tap22R = readDelay (delay3R, write3R, int (379.0f * smoothedSize));
+            let tap24R = readDelay (delay4R, write4R, int (107.0f * smoothedSize));
+            let tap26R = readDelay (delay5R, write5R, int (142.0f * smoothedSize));
+
+            let sub28R = mix19R - (tap26R * indiffusion1);
+            let add30R = (sub28R * indiffusion1) + tap26R;
+
+            let sub31R = add30R - (tap24R * indiffusion1);
+            let add33R = (sub31R * indiffusion1) + tap24R;
+
+            let sub34R = add33R - (tap22R * indiffusion2);
+            let add36R = (sub34R * indiffusion2) + tap22R;
+
+            let sub37R = add36R - (tap20R * indiffusion2);
+            let add39R = (sub37R * indiffusion2) + tap20R;
+
+            let diffusedInputR = add39R;
+
+            let tap43R = readDelay (delay6R,  write6R,  int (3163.0f * smoothedSize));
+            let tap49R = readDelay (delay7R,  write7R,  int (4217.0f * smoothedSize));
+            let tap57R = readDelay (delay8R,  write8R,  int (4453.0f * smoothedSize));
+            let tap63R = readDelay (delay9R,  write9R,  int (1800.0f * smoothedSize));
+            let tap68R = readDelay (delay10R, write10R, int (3720.0f * smoothedSize));
+            let tap74R = readDelay (delay11R, write11R, int (3720.0f * smoothedSize));
+
+            let mix79R = history14R + damping * (tap57R - history14R);
+            let mix80R = history15R + damping * (tap49R - history15R);
+            history14R = mix79R;
+            history15R = mix80R;
+
+            let mul81R = tap63R * decaydiffusion2;
+            let mul82R = tap74R * decaydiffusion2;
+
+            let mul83R = mix79R * decay;
+            let sub84R = mul83R - mul81R;
+            let add86R = (sub84R * decaydiffusion2) + tap63R;
+
+            let mul87R = mix80R * decay;
+            let sub88R = mul87R - mul82R;
+            let add90R = (sub88R * decaydiffusion2) + tap74R;
+
+            lfoPhase1R += 0.073f / sr;
+            if (lfoPhase1R &gt;= 1.0f) lfoPhase1R -= 1.0f;
+            let lfo1R = sin (lfoPhase1R * float (twoPi));
+            let modDelay1R = int ((908.0f + lfo1R * 16.0f) * smoothedSize);
+
+            lfoPhase2R += 0.091f / sr;
+            if (lfoPhase2R &gt;= 1.0f) lfoPhase2R -= 1.0f;
+            let lfo2R = sin (lfoPhase2R * float (twoPi));
+            let modDelay2R = int ((672.0f + lfo2R * 16.0f) * smoothedSize);
+
+            let tap97R  = readDelay (delay12R, write12R, modDelay1R);
+            let tap108R = readDelay (delay13R, write13R, modDelay2R);
+
+            let mul91R = tap68R * decay;
+            let add92R = mul91R + diffusedInputR;
+            let add99R = add92R + (tap97R * decaydiffusion1);
+            let mul100R = add99R * decaydiffusion1;
+            let rsub101R = tap97R - mul100R;
+
+            let mul102R = tap43R * decay;
+            let add103R = diffusedInputR + mul102R;
+            let add110R = add103R + (tap108R * decaydiffusion1);
+            let mul111R = add110R * decaydiffusion1;
+            let rsub112R = tap108R - mul111R;
+
+            let tap44R = readDelay (delay6R, write6R, int (121.0f  * smoothedSize));
+            let tap45R = readDelay (delay6R, write6R, int (1996.0f * smoothedSize));
+            let tap50R = readDelay (delay7R, write7R, int (266.0f  * smoothedSize));
+            let tap51R = readDelay (delay7R, write7R, int (2974.0f * smoothedSize));
+            let tap52R = readDelay (delay7R, write7R, int (2111.0f * smoothedSize));
+
+            let tap58R = readDelay (delay8R, write8R, int (353.0f  * smoothedSize));
+            let tap59R = readDelay (delay8R, write8R, int (3627.0f * smoothedSize));
+            let tap60R = readDelay (delay8R, write8R, int (1990.0f * smoothedSize));
+            let tap64R = readDelay (delay9R, write9R, int (187.0f  * smoothedSize));
+            let tap65R = readDelay (delay9R, write9R, int (1228.0f * smoothedSize));
+
+            let tap69R = readDelay (delay10R, write10R, int (1066.0f * smoothedSize));
+            let tap70R = readDelay (delay10R, write10R, int (2673.0f * smoothedSize));
+            let tap75R = readDelay (delay11R, write11R, int (335.0f  * smoothedSize));
+            let tap76R = readDelay (delay11R, write11R, int (1913.0f * smoothedSize));
+
+            let leftOutR  = ((tap50R + tap51R) + tap45R + tap52R + tap75R + tap44R + tap65R + tap60R);
+            let rightOutR = ((tap70R + tap58R + tap59R) + tap76R + tap69R + tap64R);
+
+            let wetR_raw = (leftOutR - rightOutR) * 0.6f;
+
+            writeDelay (delay2R,  write2R,  sub37R);
+            writeDelay (delay3R,  write3R,  sub34R);
+            writeDelay (delay4R,  write4R,  sub31R);
+            writeDelay (delay5R,  write5R,  sub28R);
+            writeDelay (delay6R,  write6R,  add90R);
+            writeDelay (delay7R,  write7R,  rsub101R);
+            writeDelay (delay8R,  write8R,  rsub112R);
+            writeDelay (delay9R,  write9R,  sub84R);
+            writeDelay (delay10R, write10R, add86R);
+            writeDelay (delay11R, write11R, sub88R);
+            writeDelay (delay12R, write12R, add99R);
+            writeDelay (delay13R, write13R, add110R);
+
+            // =========================
+            // WIDTH: 0 = MONO, 1 = WIDE (gain-compensated, clean)
+            // =========================
+            let mid  = 0.5f * (wetL_raw + wetR_raw);
+            let side = 0.5f * (wetL_raw - wetR_raw);
+
+            let maxSide = 3.0f;
+            let sideAmt = width * maxSide;              // 0..3 (0 =&gt; mono)
+            let comp    = 1.0f / (1.0f + 0.6f * sideAmt); // 1..~0.36
+
+            // extra fixed headroom for worst-case decay/width combos
+            let wetHeadroom = 0.55f;
+
+            var wetL = (mid + side * sideAmt) * comp * wetHeadroom;
+            var wetR = (mid - side * sideAmt) * comp * wetHeadroom;
+
+            // even cleaner headroom before final mix
+            wetL *= 0.85f;
+            wetR *= 0.85f;
+
+            // last-resort safety only (should rarely hit)
+            wetL = hardClip (wetL);
+            wetR = hardClip (wetR);
+
+            // final dry/wet
+            let outL = inL + drywet * (wetL - inL);
+            let outR = inR + drywet * (wetR - inR);
+
+            out &lt;- float&lt;2&gt; (outL, outR);
+            advance();
+        }
+    }
+}
+</Code>
+  <UICode>// @amorph-waterfall-ui
+// Full UI: dials + 3D-ish waterfall FFT driven by endpoint audio chunks (&quot;out&quot;).
+//
+// IMPORTANT:
+// - This version includes a live status readout + payload sniffing.
+// - It supports many common payload formats (Float32Array, ArrayBuffer, {data}, {buffer}, {left/right}).
+// - It will animate even if audio arrives sporadically, and will clearly show if NO chunks arrive.
+
+class DialControl
+{
+    constructor (options)
+    {
+        this.patchConnection = options.patchConnection;
+        this.param = options.param;
+        this.knob = options.knob;
+        this.valueLabel = options.valueLabel;
+        this.formatValue = options.formatValue;
+        this.onChange = options.onChange;
+        this.min = options.min;
+        this.max = options.max;
+        this.step = options.step;
+        this.defaultValue = options.defaultValue;
+
+        if (! (this.max &gt; this.min))
+        {
+            this.min = 0;
+            this.max = 1;
+        }
+
+        if (! (this.step &gt; 0))
+            this.step = (this.max - this.min) / 100;
+        if (! (this.step &gt; 0))
+            this.step = 0.01;
+
+        this.value = this.defaultValue;
+        this.dragging = false;
+        this.startValue = this.value;
+        this.startY = 0;
+        this.activePointerId = null;
+
+        this.knob.addEventListener(&quot;pointerdown&quot;, (e) =&gt; this.onPointerDown(e));
+        this.knob.addEventListener(&quot;pointermove&quot;, (e) =&gt; this.onPointerMove(e));
+        this.knob.addEventListener(&quot;pointerup&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;pointercancel&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;lostpointercapture&quot;, () =&gt; this.cancelDrag());
+        this.knob.addEventListener(&quot;dragstart&quot;, (e) =&gt; e.preventDefault());
+        this.knob.addEventListener(&quot;dblclick&quot;, () =&gt; this.setValue(this.defaultValue, true));
+
+        this.setValue(this.defaultValue, false);
+    }
+
+    setValue (value, notify)
+    {
+        const numericValue = Number.isFinite(value) ? value : this.defaultValue;
+        const clamped = this.clamp(this.quantize(numericValue), this.min, this.max);
+        this.value = clamped;
+        this.updateVisuals();
+
+        if (this.valueLabel)
+            this.valueLabel.textContent = this.formatValue(this.value);
+
+        if (this.onChange)
+            this.onChange(this.value);
+
+        if (notify === true)
+            this.patchConnection.sendEventOrValue(this.param, this.value);
+    }
+
+    updateVisuals()
+    {
+        const denom = this.max - this.min;
+        const norm = denom &gt; 0 ? (this.value - this.min) / denom : 0;
+        const clampedNorm = this.clamp(norm, 0, 1);
+        const angle = -135 + clampedNorm * 270;
+        this.knob.style.setProperty(&quot;--angle&quot;, &#96;${angle}deg&#96;);
+        this.knob.style.setProperty(&quot;--norm&quot;, &#96;${clampedNorm}&#96;);
+    }
+
+    setDraggingState (isDragging)
+    {
+        this.dragging = isDragging;
+        this.knob.classList.toggle(&quot;is-dragging&quot;, isDragging);
+
+        const root = this.knob.closest(&quot;.auto-ui-root&quot;);
+        if (root)
+            root.classList.toggle(&quot;is-dragging&quot;, isDragging);
+    }
+
+    cancelDrag ()
+    {
+        this.setDraggingState(false);
+        this.activePointerId = null;
+    }
+
+    onPointerDown (e)
+    {
+        if ((e.button !== undefined &amp;&amp; e.button !== 0) || e.isPrimary === false)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.startY = e.clientY;
+        this.startValue = this.value;
+        this.activePointerId = e.pointerId;
+        this.setDraggingState(true);
+
+        try { this.knob.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    onPointerMove (e)
+    {
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+
+        const delta = this.startY - e.clientY;
+        const range = this.max - this.min;
+        const sensitivity = range / 170;
+        const fine = e.shiftKey ? 0.2 : 1.0;
+        const nextValue = this.startValue + delta * sensitivity * fine;
+        this.setValue(nextValue, true);
+    }
+
+    onPointerUp (e)
+    {
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.setDraggingState(false);
+        this.activePointerId = null;
+
+        try
+        {
+            if (this.knob.hasPointerCapture(e.pointerId))
+                this.knob.releasePointerCapture(e.pointerId);
+        }
+        catch (_) {}
+    }
+
+    clamp (value, min, max) { return Math.max(min, Math.min(max, value)); }
+
+    quantize (value)
+    {
+        if (!this.step || this.step &lt;= 0) return value;
+        const steps = Math.round((value - this.min) / this.step);
+        return this.min + steps * this.step;
+    }
+}
+
+// ======================================================
+// Endpoint audio normalization (robust)
+// ======================================================
+
+function normalizeAudioChunk (payload)
+{
+    // Returns { mono, sampleRate, kind, length }
+    const result = { mono: null, sampleRate: undefined, kind: &quot;&quot;, length: 0 };
+    const visited = new Set();
+
+    const setSampleRate = (sr) =&gt;
+    {
+        const n = Number(sr);
+        if (Number.isFinite(n) &amp;&amp; n &gt; 1000 &amp;&amp; n &lt; 768000)
+            result.sampleRate = n;
+    };
+
+    const i16ToF32 = (i16) =&gt;
+    {
+        const f = new Float32Array(i16.length);
+        for (let i = 0; i &lt; i16.length; i++)
+            f[i] = i16[i] / 32768;
+        return f;
+    };
+
+    const numericArrayToF32 = (arr) =&gt;
+    {
+        if (!Array.isArray(arr)) return null;
+        const out = new Float32Array(arr.length);
+        for (let i = 0; i &lt; arr.length; i++)
+            out[i] = Number(arr[i]) || 0;
+        return out;
+    };
+
+    const toF32 = (x) =&gt;
+    {
+        if (!x) return null;
+
+        if (x instanceof Float32Array)
+            return x;
+
+        if (x instanceof Int16Array)
+            return i16ToF32(x);
+
+        if (x instanceof ArrayBuffer)
+        {
+            if ((x.byteLength % 4) === 0)
+                return new Float32Array(x);
+            if ((x.byteLength % 2) === 0)
+                return i16ToF32(new Int16Array(x));
+            return null;
+        }
+
+        if (Array.isArray(x))
+            return numericArrayToF32(x);
+
+        if (ArrayBuffer.isView(x))
+        {
+            if (x instanceof DataView)
+                return null;
+
+            if (x instanceof Float32Array)
+                return x;
+
+            if (x instanceof Int16Array)
+                return i16ToF32(x);
+
+            if ((x.byteLength % 4) === 0)
+                return new Float32Array(x.buffer, x.byteOffset, Math.floor(x.byteLength / 4));
+
+            const out = new Float32Array(x.length || 0);
+            for (let i = 0; i &lt; out.length; i++)
+                out[i] = Number(x[i]) || 0;
+            return out;
+        }
+
+        return null;
+    };
+
+    const setMono = (mono, kind) =&gt;
+    {
+        if (!mono || mono.length === 0)
+            return false;
+
+        result.mono = mono;
+        result.length = mono.length;
+        result.kind = kind;
+        return true;
+    };
+
+    const toMonoFromChannels = (channelBuffers, kind) =&gt;
+    {
+        if (!Array.isArray(channelBuffers) || channelBuffers.length === 0)
+            return false;
+
+        const channels = [];
+        for (const ch of channelBuffers)
+        {
+            const f = toF32(ch);
+            if (f &amp;&amp; f.length &gt; 0)
+                channels.push(f);
+        }
+
+        if (channels.length === 0)
+            return false;
+
+        let minLen = channels[0].length;
+        for (let i = 1; i &lt; channels.length; i++)
+            minLen = Math.min(minLen, channels[i].length);
+
+        if (!(minLen &gt; 0))
+            return false;
+
+        const mono = new Float32Array(minLen);
+        for (let i = 0; i &lt; minLen; i++)
+        {
+            let sum = 0;
+            for (let ch = 0; ch &lt; channels.length; ch++)
+                sum += channels[ch][i] || 0;
+            mono[i] = sum / channels.length;
+        }
+
+        return setMono(mono, kind);
+    };
+
+    const decode = (node, path) =&gt;
+    {
+        if (node == null)
+            return false;
+
+        if (node instanceof Float32Array)
+            return setMono(node, &#96;${path}:Float32Array&#96;);
+
+        if (node instanceof Int16Array)
+            return setMono(i16ToF32(node), &#96;${path}:Int16Array&#96;);
+
+        if (node instanceof ArrayBuffer)
+            return setMono(toF32(node), &#96;${path}:ArrayBuffer&#96;);
+
+        if (Array.isArray(node))
+        {
+            if (node.length === 0)
+                return false;
+
+            const first = node[0];
+
+            if (Array.isArray(first) || first instanceof ArrayBuffer || ArrayBuffer.isView(first))
+                return toMonoFromChannels(node, &#96;${path}:channels[${node.length}]&#96;);
+
+            const mono = toF32(node);
+            return setMono(mono, &#96;${path}:number[]&#96;);
+        }
+
+        if (ArrayBuffer.isView(node))
+            return setMono(toF32(node), &#96;${path}:TypedArray&#96;);
+
+        if (typeof node !== &quot;object&quot;)
+            return false;
+
+        if (visited.has(node))
+            return false;
+
+        visited.add(node);
+
+        if (node.sampleRate != null)
+            setSampleRate(node.sampleRate);
+
+        if (node.min != null &amp;&amp; node.max != null)
+        {
+            const toNumberArray = (x) =&gt;
+            {
+                if (Array.isArray(x)) return x;
+                if (ArrayBuffer.isView(x)) return Array.from(x);
+                if (typeof x === &quot;number&quot;) return [x];
+                return [];
+            };
+
+            const mins = toNumberArray(node.min);
+            const maxs = toNumberArray(node.max);
+            const n = Math.min(mins.length, maxs.length);
+
+            if (n &gt; 0)
+            {
+                let meanMin = 0;
+                let meanMax = 0;
+                for (let i = 0; i &lt; n; i++)
+                {
+                    meanMin += Number(mins[i]) || 0;
+                    meanMax += Number(maxs[i]) || 0;
+                }
+
+                meanMin /= n;
+                meanMax /= n;
+
+                const frames = 128;
+                const mono = new Float32Array(frames);
+                for (let i = 0; i &lt; frames; i++)
+                    mono[i] = (i &amp; 1) ? meanMax : meanMin;
+
+                return setMono(mono, &#96;${path}:min/max&#96;);
+            }
+        }
+
+        if (node.left != null &amp;&amp; node.right != null)
+            if (toMonoFromChannels([node.left, node.right], &#96;${path}:left/right&#96;))
+                return true;
+
+        const channels = Number(node.channels ?? node.channelCount ?? node.numChannels ?? 0);
+        const interleaved = node.interleaved !== false;
+
+        if (channels &gt; 1 &amp;&amp; interleaved)
+        {
+            const rawInterleaved = toF32(node.data ?? node.frames ?? node.samples ?? node.buffer);
+            if (rawInterleaved &amp;&amp; rawInterleaved.length &gt;= channels)
+            {
+                const frames = Math.floor(rawInterleaved.length / channels);
+                if (frames &gt; 0)
+                {
+                    const mono = new Float32Array(frames);
+                    for (let i = 0; i &lt; frames; i++)
+                    {
+                        let sum = 0;
+                        const base = i * channels;
+                        for (let c = 0; c &lt; channels; c++)
+                            sum += rawInterleaved[base + c] || 0;
+                        mono[i] = sum / channels;
+                    }
+                    return setMono(mono, &#96;${path}:interleaved(${channels}ch)&#96;);
+                }
+            }
+        }
+
+        if (toMonoFromChannels(node.data, &#96;${path}.data:channels&#96;))
+            return true;
+
+        if (toMonoFromChannels(node.frames, &#96;${path}.frames:channels&#96;))
+            return true;
+
+        const directAudioKeys = [&quot;data&quot;, &quot;buffer&quot;, &quot;frames&quot;, &quot;samples&quot;, &quot;pcm&quot;, &quot;audio&quot;];
+        for (const key of directAudioKeys)
+        {
+            if (node[key] == null)
+                continue;
+
+            if (decode(node[key], &#96;${path}.${key}&#96;))
+                return true;
+        }
+
+        const wrapperKeys = [&quot;value&quot;, &quot;payload&quot;, &quot;chunk&quot;, &quot;event&quot;, &quot;detail&quot;];
+        for (const key of wrapperKeys)
+        {
+            if (node[key] == null)
+                continue;
+
+            if (decode(node[key], &#96;${path}.${key}&#96;))
+                return true;
+        }
+
+        return false;
+    };
+
+    decode(payload, &quot;payload&quot;);
+
+    if (!result.kind)
+        result.kind = payload?.constructor?.name ?? typeof payload;
+
+    return result;
+}
+
+// ======================================================
+// FFT + Waterfall (endpoint-driven)
+// ======================================================
+
+function hannWindow (n, N)
+{
+    return 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1));
+}
+
+function clamp01 (x) { return Math.max(0, Math.min(1, x)); }
+
+class FFT
+{
+    constructor (fftSize)
+    {
+        this.N = fftSize;
+        this.bits = Math.round(Math.log2(this.N));
+
+        this.rev = new Uint32Array(this.N);
+        for (let i = 0; i &lt; this.N; i++)
+        {
+            let x = i;
+            let y = 0;
+            for (let b = 0; b &lt; this.bits; b++)
+            {
+                y = (y &lt;&lt; 1) | (x &amp; 1);
+                x &gt;&gt;= 1;
+            }
+            this.rev[i] = y &gt;&gt;&gt; 0;
+        }
+
+        this.cos = new Float32Array(this.N / 2);
+        this.sin = new Float32Array(this.N / 2);
+        for (let k = 0; k &lt; this.N / 2; k++)
+        {
+            const a = -2 * Math.PI * k / this.N;
+            this.cos[k] = Math.cos(a);
+            this.sin[k] = Math.sin(a);
+        }
+
+        this.re = new Float32Array(this.N);
+        this.im = new Float32Array(this.N);
+    }
+
+    forwardReal (input, window)
+    {
+        const N = this.N;
+
+        for (let i = 0; i &lt; N; i++)
+        {
+            const j = this.rev[i];
+            const w = window ? window[j] : 1.0;
+            this.re[i] = (input[j] || 0) * w;
+            this.im[i] = 0;
+        }
+
+        for (let size = 2; size &lt;= N; size &lt;&lt;= 1)
+        {
+            const half = size &gt;&gt;&gt; 1;
+            const step = N / size;
+
+            for (let i = 0; i &lt; N; i += size)
+            {
+                let k = 0;
+                for (let j = 0; j &lt; half; j++)
+                {
+                    const tRe = this.re[i + j + half];
+                    const tIm = this.im[i + j + half];
+
+                    const c = this.cos[k];
+                    const s = this.sin[k];
+
+                    const mRe = tRe * c - tIm * s;
+                    const mIm = tRe * s + tIm * c;
+
+                    const uRe = this.re[i + j];
+                    const uIm = this.im[i + j];
+
+                    this.re[i + j] = uRe + mRe;
+                    this.im[i + j] = uIm + mIm;
+                    this.re[i + j + half] = uRe - mRe;
+                    this.im[i + j + half] = uIm - mIm;
+
+                    k += step;
+                }
+            }
+        }
+
+        return { re: this.re, im: this.im };
+    }
+}
+
+class Waterfall3D
+{
+    constructor (canvas, opts = {})
+    {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext(&quot;2d&quot;, { alpha: true, desynchronized: true });
+
+        this.fftSize = opts.fftSize ?? 2048;
+        this.hopSize = opts.hopSize ?? 512;
+        this.historyLength = opts.historyLength ?? 120;
+        this.fps = opts.fps ?? 45;
+
+        this.minHz = opts.minHz ?? 25;
+        this.maxHz = opts.maxHz ?? 18000;
+        this.centerHz = opts.centerHz ?? 1000;
+        this.useLogAxis = opts.useLogAxis !== false;
+
+        this.depth = opts.depth ?? 0.75;
+
+        this.floorDb = opts.floorDb ?? -90;
+        this.ceilDb  = opts.ceilDb  ?? -18;
+        this.spectrumSmoothing = clamp01(opts.spectrumSmoothing ?? 0.34);
+        this.binSmoothing = clamp01(opts.binSmoothing ?? 0.20);
+
+        this.sampleRate = opts.sampleRate ?? 48000;
+
+        this.monoRing = new Float32Array(this.fftSize * 4);
+        this.ringWrite = 0;
+        this.ringCount = 0;
+
+        this.window = new Float32Array(this.fftSize);
+        for (let i = 0; i &lt; this.fftSize; i++)
+            this.window[i] = hannWindow(i, this.fftSize);
+
+        this.fft = new FFT(this.fftSize);
+        this.frame = new Float32Array(this.fftSize);
+
+        this.bins = this.fftSize &gt;&gt; 1;
+        this.history = Array.from({ length: this.historyLength }, () =&gt; new Float32Array(this.bins));
+        this._specScratch = new Float32Array(this.bins);
+        this.histWrite = 0;
+
+        this._isDestroyed = false;
+        this._raf = 0;
+        this._lastDraw = 0;
+
+        this.resizeObserver = new ResizeObserver(() =&gt; this.resizeToDisplaySize());
+        this.resizeObserver.observe(canvas);
+        this.resizeToDisplaySize();
+        this._startRenderLoop();
+    }
+
+    destroy ()
+    {
+        this._isDestroyed = true;
+        cancelAnimationFrame(this._raf);
+        this._raf = 0;
+        try { this.resizeObserver.disconnect(); } catch (_) {}
+    }
+
+    _startRenderLoop ()
+    {
+        if (this._isDestroyed || this._raf)
+            return;
+
+        this._renderLoop = (t) =&gt;
+        {
+            this._raf = requestAnimationFrame(this._renderLoop);
+            const dt = t - this._lastDraw;
+            if (dt &lt; (1000 / this.fps))
+                return;
+            this._lastDraw = t;
+            this.draw();
+        };
+
+        this._raf = requestAnimationFrame(this._renderLoop);
+    }
+
+    wake ()
+    {
+        if (this._isDestroyed)
+            return;
+
+        this.resizeToDisplaySize();
+        this._lastDraw = 0;
+        this._startRenderLoop();
+    }
+
+    setSampleRate (sr)
+    {
+        if (Number.isFinite(sr) &amp;&amp; sr &gt; 8000)
+            this.sampleRate = sr;
+    }
+
+    pushMonoSamples (mono)
+    {
+        for (let i = 0; i &lt; mono.length; i++)
+        {
+            this.monoRing[this.ringWrite] = mono[i];
+            this.ringWrite = (this.ringWrite + 1) % this.monoRing.length;
+            this.ringCount = Math.min(this.monoRing.length, this.ringCount + 1);
+        }
+
+        while (this.ringCount &gt;= this.fftSize)
+        {
+            const start = (this.ringWrite - this.fftSize + this.monoRing.length) % this.monoRing.length;
+            for (let i = 0; i &lt; this.fftSize; i++)
+                this.frame[i] = this.monoRing[(start + i) % this.monoRing.length];
+
+            this.computeAndStoreSpectrum();
+
+            this.ringCount = Math.max(0, this.ringCount - this.hopSize);
+        }
+    }
+
+    hzToBin (hz)
+    {
+        const nyquist = this.sampleRate * 0.5;
+        const clamped = Math.max(0, Math.min(nyquist, hz));
+        return Math.max(0, Math.min(this.bins - 1, Math.floor((clamped / nyquist) * (this.bins - 1))));
+    }
+
+    hzToBinFloat (hz)
+    {
+        const nyquist = this.sampleRate * 0.5;
+        const clamped = Math.max(0, Math.min(nyquist, hz));
+        return Math.max(0, Math.min(this.bins - 1, (clamped / nyquist) * (this.bins - 1)));
+    }
+
+    xNormToHz (t)
+    {
+        const x = clamp01(t);
+
+        if (!this.useLogAxis)
+            return this.minHz + x * (this.maxHz - this.minHz);
+
+        const lo = Math.max(1e-6, this.minHz);
+        const hi = Math.max(lo * 1.001, this.maxHz);
+        const mid = Math.max(lo * 1.001, Math.min(hi * 0.999, this.centerHz));
+
+        if (x &lt;= 0.5)
+        {
+            const a = x / 0.5;
+            return lo * Math.pow(mid / lo, a);
+        }
+
+        const b = (x - 0.5) / 0.5;
+        return mid * Math.pow(hi / mid, b);
+    }
+
+    magToNorm (mag)
+    {
+        const eps = 1e-12;
+        const db = 20 * Math.log10(Math.max(eps, mag));
+        const t = (db - this.floorDb) / (this.ceilDb - this.floorDb);
+        return clamp01(t);
+    }
+
+    sampleSpectrum (spec, binF, minBin, maxBin)
+    {
+        const b0 = Math.max(minBin, Math.min(maxBin, Math.floor(binF)));
+        const b1 = Math.max(minBin, Math.min(maxBin, b0 + 1));
+        const frac = binF - b0;
+
+        const m0 = spec[b0] || 0;
+        const m1 = spec[b1] || 0;
+        let mag = m0 + (m1 - m0) * frac;
+
+        if (this.binSmoothing &gt; 0)
+        {
+            const l0 = Math.max(minBin, Math.min(maxBin, b0 - 1));
+            const l1 = Math.max(minBin, Math.min(maxBin, l0 + 1));
+            const r0 = Math.max(minBin, Math.min(maxBin, b0 + 1));
+            const r1 = Math.max(minBin, Math.min(maxBin, r0 + 1));
+
+            const left = (spec[l0] || 0) + ((spec[l1] || 0) - (spec[l0] || 0)) * frac;
+            const right = (spec[r0] || 0) + ((spec[r1] || 0) - (spec[r0] || 0)) * frac;
+            const side = 0.5 * (left + right);
+            mag = mag * (1 - this.binSmoothing) + side * this.binSmoothing;
+        }
+
+        return mag;
+    }
+
+    computeAndStoreSpectrum ()
+    {
+        const { re, im } = this.fft.forwardReal(this.frame, this.window);
+        const spec = this.history[this.histWrite];
+        const prevSpec = this.history[(this.histWrite - 1 + this.history.length) % this.history.length];
+        const N = this.fftSize;
+        const invN = 1.0 / N;
+
+        for (let i = 0; i &lt; this.bins; i++)
+        {
+            const rr = re[i] * invN;
+            const ii = im[i] * invN;
+            const mag = Math.sqrt(rr * rr + ii * ii);
+            const prev = prevSpec ? prevSpec[i] : mag;
+            spec[i] = prev * this.spectrumSmoothing + mag * (1 - this.spectrumSmoothing);
+        }
+
+        if (this.binSmoothing &gt; 0)
+        {
+            this._specScratch[0] = spec[0];
+            for (let i = 1; i &lt; this.bins - 1; i++)
+                this._specScratch[i] = 0.25 * spec[i - 1] + 0.5 * spec[i] + 0.25 * spec[i + 1];
+            this._specScratch[this.bins - 1] = spec[this.bins - 1];
+
+            for (let i = 0; i &lt; this.bins; i++)
+                spec[i] = spec[i] * (1 - this.binSmoothing) + this._specScratch[i] * this.binSmoothing;
+        }
+
+        this.histWrite = (this.histWrite + 1) % this.history.length;
+    }
+
+    resizeToDisplaySize ()
+    {
+        const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+        const rect = this.canvas.getBoundingClientRect();
+        const w = Math.max(1, Math.floor(rect.width * dpr));
+        const h = Math.max(1, Math.floor(rect.height * dpr));
+        if (this.canvas.width !== w || this.canvas.height !== h)
+        {
+            this.canvas.width = w;
+            this.canvas.height = h;
+        }
+    }
+
+    drawGrid (ctx, w, h)
+    {
+        ctx.save();
+        ctx.globalAlpha = 0.13;
+        ctx.strokeStyle = &quot;#9db2d6&quot;;
+        ctx.lineWidth = Math.max(1, Math.floor(Math.min(w, h) * 0.002));
+
+        const baseY = h * 0.84;
+        const leftX = w * 0.08;
+        const rightX = w * 0.92;
+
+        const lines = 10;
+        for (let i = 0; i &lt;= lines; i++)
+        {
+            const z = i / lines;
+            const scale = 1 - z * this.depth;
+            const y = baseY - z * (h * 0.64);
+            const xPad = (1 - scale) * (w * 0.22);
+
+            ctx.beginPath();
+            ctx.moveTo(leftX + xPad, y);
+            ctx.lineTo(rightX - xPad, y);
+            ctx.stroke();
+        }
+
+        const vLines = 9;
+        for (let i = 0; i &lt;= vLines; i++)
+        {
+            const xNorm = i / vLines;
+            ctx.beginPath();
+            ctx.moveTo(leftX + xNorm * (rightX - leftX), baseY);
+
+            const farY = baseY - (h * 0.64);
+            const farScale = 1 - this.depth;
+            const farLeft = leftX + (1 - farScale) * (w * 0.22);
+            const farRight = rightX - (1 - farScale) * (w * 0.22);
+            ctx.lineTo(farLeft + xNorm * (farRight - farLeft), farY);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+
+    draw ()
+    {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+
+        if (w &lt;= 1 || h &lt;= 1)
+        {
+            this.resizeToDisplaySize();
+            return;
+        }
+
+        ctx.clearRect(0, 0, w, h);
+
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        const bg = ctx.createLinearGradient(0, 0, 0, h);
+        bg.addColorStop(0, &quot;rgba(10, 17, 29, 0.34)&quot;);
+        bg.addColorStop(1, &quot;rgba(7, 12, 22, 0.22)&quot;);
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+
+        this.drawGrid(ctx, w, h);
+
+        const baseY = h * 0.84;
+        const leftX = w * 0.08;
+        const rightX = w * 0.92;
+
+        const minBin = this.hzToBin(this.minHz);
+        const maxBin = Math.max(minBin + 8, this.hzToBin(this.maxHz));
+        const span = Math.max(8, maxBin - minBin);
+
+        for (let i = 0; i &lt; this.history.length; i++)
+        {
+            const age = i / (this.history.length - 1);
+            const z = 1 - age;
+            const scale = 1 - z * this.depth;
+
+            const y = baseY - z * (h * 0.64);
+            const xPad = (1 - scale) * (w * 0.22);
+
+            const x0 = leftX + xPad;
+            const x1 = rightX - xPad;
+            const xSpan = x1 - x0;
+
+            const idx = (this.histWrite + i) % this.history.length;
+            const spec = this.history[idx];
+
+            const alpha = 0.05 + age * 0.60;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.strokeStyle = age &gt; 0.75 ? &quot;#f2f6ff&quot; : &quot;#cbd6e6&quot;;
+            ctx.lineWidth = Math.max(1, Math.floor(scale * Math.min(w, h) * 0.0022));
+
+            ctx.beginPath();
+            const drawPoints = Math.max(640, Math.min(2048, span));
+
+            for (let p = 0; p &lt;= drawPoints; p++)
+            {
+                const t = p / drawPoints;
+                const hz = this.xNormToHz(t);
+                const binF = this.hzToBinFloat(hz);
+                const mag = this.sampleSpectrum(spec, binF, minBin, maxBin);
+                const a = this.magToNorm(mag);
+
+                const peak = (h * 0.30) * scale;
+                const yy = y - a * peak;
+                const xx = x0 + t * xSpan;
+
+                if (p === 0)
+                    ctx.moveTo(xx, yy);
+                else
+                    ctx.lineTo(xx, yy);
+            }
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = &quot;#dfe4eb&quot;;
+        ctx.font = &#96;${Math.floor(h * 0.065)}px Space Grotesk, system-ui, sans-serif&#96;;
+        ctx.textAlign = &quot;left&quot;;
+        ctx.textBaseline = &quot;top&quot;;
+        ctx.fillText(&quot;Waterfall FFT&quot;, Math.floor(w * 0.04), Math.floor(h * 0.06));
+        ctx.restore();
+    }
+}
+
+// ======================================================
+// Patch View
+// ======================================================
+
+class AutoDialsPatchView extends HTMLElement
+{
+    constructor (patchConnection)
+    {
+        super();
+        this.patchConnection = patchConnection;
+        this.className = &quot;auto-ui-root&quot;;
+
+        this.paramSpecs = [
+            { id: 'param1', label: 'Mix', min: 0, max: 1, step: 0.01, init: 0.5, unit: '', labels: [] },
+            { id: 'param2', label: 'Decay', min: 0, max: 1, step: 0.01, init: 0.5, unit: '', labels: [] },
+            { id: 'param3', label: 'Size', min: 0.25, max: 2, step: 0.01, init: 1, unit: 'x', labels: [] },
+            { id: 'param4', label: 'Damping', min: 0, max: 1, step: 0.01, init: 0.5, unit: '', labels: [] },
+            { id: 'param5', label: 'PreDelay', min: 0, max: 100, step: 0.01, init: 0, unit: 'ms', labels: [] },
+            { id: 'param6', label: 'Width', min: 0, max: 1, step: 0.01, init: 0.8, unit: '', labels: [] }
+        ];
+
+        this.innerHTML = this.getHTML();
+        this.controls = new Map();
+
+        this.paramListener = null;
+        this.endpointUnsub = [];
+
+        this.waterfall = null;
+        this.endpointFrameSize = 256;
+
+        this.outputEndpointListener = (payload) =&gt;
+        {
+            const { mono, sampleRate } = normalizeAudioChunk(payload);
+
+            if (this.waterfall &amp;&amp; sampleRate)
+                this.waterfall.setSampleRate(sampleRate);
+
+            if (this.waterfall &amp;&amp; mono &amp;&amp; mono.length &gt; 0)
+                this.waterfall.pushMonoSamples(mono);
+        };
+
+        this.onWindowFocus = () =&gt; this.handleWake();
+        this.onPageShow = () =&gt; this.handleWake();
+        this.onVisibilityChange = () =&gt;
+        {
+            if (!document.hidden)
+                this.handleWake();
+        };
+    }
+
+    connectedCallback()
+    {
+        // ----- Dials -----
+        const controlNodes = this.querySelectorAll(&quot;.control&quot;);
+        controlNodes.forEach((controlNode) =&gt;
+        {
+            const param = controlNode.dataset.param;
+            const spec = this.paramSpecs.find((s) =&gt; s.id === param);
+            if (!spec) return;
+
+            const knob = controlNode.querySelector(&quot;.knob&quot;);
+            const valueLabel = controlNode.querySelector(&quot;.control-value&quot;);
+            if (!knob || !valueLabel) return;
+
+            const dial = new DialControl({
+                patchConnection: this.patchConnection,
+                param,
+                knob,
+                valueLabel,
+                min: Number(spec.min),
+                max: Number(spec.max),
+                step: Number(spec.step),
+                defaultValue: Number(spec.init),
+                formatValue: (value) =&gt; this.formatValue(spec, value),
+                onChange: () =&gt; {}
+            });
+
+            this.controls.set(param, dial);
+            this.patchConnection.requestParameterValue(param);
+        });
+
+        this.paramListener = (event) =&gt;
+        {
+            const control = this.controls.get(event.endpointID);
+            if (!control) return;
+            control.setValue(Number(event.value), false);
+        };
+        this.patchConnection.addAllParameterListener(this.paramListener);
+
+        // ----- Waterfall -----
+        const canvas = this.querySelector(&quot;.waterfall-canvas&quot;);
+        this.waterfall = new Waterfall3D(canvas, {
+            fftSize: 4096,
+            hopSize: 1024,
+            historyLength: 120,
+            fps: 45,
+            minHz: 25,
+            maxHz: 18000,
+            centerHz: 1000,
+            useLogAxis: true,
+            spectrumSmoothing: 0.38,
+            binSmoothing: 0.24,
+            floorDb: -90,
+            ceilDb: -18,
+            depth: 0.75,
+            sampleRate: 48000
+        });
+
+        window.addEventListener(&quot;focus&quot;, this.onWindowFocus);
+        window.addEventListener(&quot;pageshow&quot;, this.onPageShow);
+        document.addEventListener(&quot;visibilitychange&quot;, this.onVisibilityChange);
+
+        this.handleWake();
+    }
+
+    disconnectedCallback()
+    {
+        this.controls.forEach((control) =&gt; control.cancelDrag());
+
+        if (this.paramListener)
+            this.patchConnection.removeAllParameterListener(this.paramListener);
+
+        window.removeEventListener(&quot;focus&quot;, this.onWindowFocus);
+        window.removeEventListener(&quot;pageshow&quot;, this.onPageShow);
+        document.removeEventListener(&quot;visibilitychange&quot;, this.onVisibilityChange);
+
+        this.detachOutputEndpointListener();
+
+        if (this.waterfall)
+        {
+            this.waterfall.destroy();
+            this.waterfall = null;
+        }
+    }
+
+    attachOutputEndpointListener()
+    {
+        this.detachOutputEndpointListener();
+
+        if (!this.patchConnection || !this.outputEndpointListener)
+            return;
+
+        // Optional: if your wrapper needs explicit enable call, uncomment and adapt.
+        // this.patchConnection.enableEndpointMonitor?.(&quot;out&quot;, true);
+        // this.patchConnection.subscribeEndpoint?.(&quot;out&quot;);
+        // this.patchConnection.requestEndpointStream?.(&quot;out&quot;);
+
+        const unsubOut = this.patchConnection.addEndpointListener(&quot;out&quot;, this.outputEndpointListener, this.endpointFrameSize, true);
+        if (typeof unsubOut === &quot;function&quot;)
+            this.endpointUnsub.push(unsubOut);
+    }
+
+    detachOutputEndpointListener()
+    {
+        for (const fn of this.endpointUnsub)
+            try { fn(); } catch (_) {}
+
+        this.endpointUnsub = [];
+
+        if (this.patchConnection &amp;&amp; this.outputEndpointListener)
+        {
+            try { this.patchConnection.removeEndpointListener(&quot;out&quot;, this.outputEndpointListener); }
+            catch (_) {}
+        }
+    }
+
+    handleWake()
+    {
+        if (this.waterfall)
+            this.waterfall.wake();
+
+        if (!document.hidden)
+            this.attachOutputEndpointListener();
+    }
+
+    getDecimals (step)
+    {
+        if (!Number.isFinite(step) || step &lt;= 0) return 2;
+        const text = String(step);
+        const dot = text.indexOf(&quot;.&quot;);
+        if (dot &lt; 0) return 0;
+        return Math.min(6, text.length - dot - 1);
+    }
+
+    formatValue (spec, value)
+    {
+        const numericValue = Number.isFinite(value) ? value : Number(spec.init) || 0;
+        const min = Number.isFinite(spec.min) ? spec.min : 0;
+        const max = Number.isFinite(spec.max) ? spec.max : 1;
+        const clamped = Math.max(min, Math.min(max, numericValue));
+
+        const decimals = this.getDecimals(spec.step);
+        const base = clamped.toFixed(decimals);
+        if (spec.unit &amp;&amp; spec.unit.length &gt; 0) return &#96;${base} ${spec.unit}&#96;;
+        return base;
+    }
+
+    escapeHTML (text)
+    {
+        return String(text)
+            .replaceAll(&quot;&amp;&quot;, &quot;&amp;amp;&quot;)
+            .replaceAll(&quot;&lt;&quot;, &quot;&amp;lt;&quot;)
+            .replaceAll(&quot;&gt;&quot;, &quot;&amp;gt;&quot;)
+            .replaceAll(&quot;\&quot;&quot;, &quot;&amp;quot;&quot;)
+            .replaceAll(&quot;'&quot;, &quot;&amp;#39;&quot;);
+    }
+
+    getHTML()
+    {
+        const controls = this.paramSpecs.map((spec) =&gt;
+            &#96;&lt;div class=&quot;control&quot; data-param=&quot;${spec.id}&quot; data-min=&quot;${spec.min}&quot; data-max=&quot;${spec.max}&quot; data-step=&quot;${spec.step}&quot; data-init=&quot;${spec.init}&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;
+                    &lt;div class=&quot;knob-track&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-fill&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-core&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-pointer&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;control-value&quot;&gt;${this.formatValue(spec, spec.init)}&lt;/div&gt;
+                &lt;/div&gt;
+                &lt;div class=&quot;control-label&quot;&gt;${this.escapeHTML(spec.label)}&lt;/div&gt;
+            &lt;/div&gt;&#96;).join(&quot;&quot;);
+
+        return &#96;
+            &lt;style&gt;
+                .auto-ui-root, .auto-ui-root * {
+                    box-sizing: border-box;
+                    font-family: &quot;Space Grotesk&quot;, system-ui, sans-serif;
+                    user-select: none;
+                    -webkit-user-select: none;
+                }
+
+                .auto-ui-shell {
+                    min-height: 100%;
+                    padding: 18px;
+                    color: #dfe4eb;
+                    background: radial-gradient(900px 520px at 8% -4%, #2a313c 0%, #1b212b 52%, #151a22 100%);
+                    display: grid;
+                    grid-template-rows: auto auto 1fr;
+                    gap: 14px;
+                }
+
+                .auto-ui-title {
+                    margin: 0;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    font-size: 12px;
+                    color: #9ca6b4;
+                    display: block;
+                }
+
+                .waterfall {
+                    position: relative;
+                    height: 240px;
+                    border-radius: 16px;
+                    overflow: hidden;
+                    border: 1px solid rgba(141, 159, 184, 0.20);
+                    background: linear-gradient(180deg, rgba(10, 14, 21, 0.55), rgba(0,0,0,0.18));
+                    box-shadow: inset 0 1px 1px rgba(255,255,255,0.05);
+                }
+
+                .waterfall-canvas {
+                    width: 100%;
+                    height: 100%;
+                    display: block;
+                }
+
+                .controls-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+                    gap: 14px;
+                }
+
+                .control {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 8px 6px 4px;
+                }
+
+                .auto-ui-root.is-dragging,
+                .auto-ui-root.is-dragging * {
+                    cursor: ns-resize !important;
+                }
+
+                .knob {
+                    position: relative;
+                    width: 72px;
+                    height: 72px;
+                    --angle: -135deg;
+                    --norm: 0;
+                    cursor: ns-resize;
+                    touch-action: none;
+                    -webkit-tap-highlight-color: transparent;
+                }
+
+                .knob-track,
+                .knob-fill,
+                .knob-core {
+                    position: absolute;
+                    border-radius: 50%;
+                }
+
+                .knob-track,
+                .knob-fill {
+                    inset: 0;
+                    --ring-thickness: 5px;
+                    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                    mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                }
+
+                .knob-track {
+                    background: conic-gradient(from -135deg, rgba(176, 193, 216, 0.18) 0deg 270deg, transparent 270deg 360deg);
+                }
+
+                .knob-fill {
+                    background: conic-gradient(
+                        from -135deg,
+                        rgba(178, 200, 229, 0.45) 0deg,
+                        #dce7f5 calc(var(--norm) * 270deg),
+                        transparent calc(var(--norm) * 270deg) 360deg
+                    );
+                    filter: drop-shadow(0 0 5px rgba(220, 232, 248, 0.22));
+                }
+
+                .knob-core {
+                    inset: 6px;
+                    background: linear-gradient(180deg, rgba(18, 23, 32, 0.86) 0%, rgba(10, 14, 21, 0.92) 100%);
+                    border: 1px solid rgba(141, 159, 184, 0.26);
+                    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.35);
+                }
+
+                .knob-pointer {
+                    position: absolute;
+                    left: 50%;
+                    top: 50%;
+                    width: 2px;
+                    height: 17px;
+                    border-radius: 999px;
+                    background: #dce7f6;
+                    transform-origin: center 15px;
+                    transform: translate(-50%, -100%) rotate(var(--angle));
+                    box-shadow: 0 0 8px rgba(220, 232, 248, 0.3);
+                }
+
+                .control-value {
+                    position: absolute;
+                    inset: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: 0.03em;
+                    color: #dce7f7;
+                    text-align: center;
+                    text-shadow: 0 0 8px rgba(220, 232, 248, 0.2);
+                    pointer-events: none;
+                }
+
+                .control-label {
+                    font-size: 12px;
+                    letter-spacing: 0.05em;
+                    text-transform: uppercase;
+                    color: #c5ccd7;
+                    text-align: center;
+                    min-height: 14px;
+                }
+            &lt;/style&gt;
+
+            &lt;div class=&quot;auto-ui-shell&quot;&gt;
+                &lt;div class=&quot;auto-ui-title&quot;&gt;
+                    &lt;span&gt;Waterfall FFT&lt;/span&gt;
+                &lt;/div&gt;
+
+                &lt;div class=&quot;waterfall&quot;&gt;
+                    &lt;canvas class=&quot;waterfall-canvas&quot;&gt;&lt;/canvas&gt;
+                &lt;/div&gt;
+
+                &lt;div class=&quot;controls-grid&quot;&gt;${controls}&lt;/div&gt;
+            &lt;/div&gt;
+        &#96;;
+    }
+}
+
+export default function createPatchView (patchConnection)
+{
+    const name = &quot;amorph-waterfall-endpoint-view&quot;;
+    if (!window.customElements.get(name))
+        window.customElements.define(name, AutoDialsPatchView);
+
+    return new (window.customElements.get(name)) (patchConnection);
+}
+</UICode>
+</AmorphAlgorithm>
