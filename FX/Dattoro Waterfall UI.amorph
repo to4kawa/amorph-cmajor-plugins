@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AmorphAlgorithm name="Dattoro Waterfall UI" date="2026-02-12T00:44:41.267+01:00">
+  <PresentationConfig title="Reverb Dattoro Style" author="Artists in DSP" paramCount="6" />
+  <Code><![CDATA[
+Provided by user: Dattoro Waterfall UI algorithm code.
+  ]]></Code>
+  <UICode><![CDATA[
+Provided by user: Dattoro Waterfall UI JS UI code.
+  ]]></UICode>
+</AmorphAlgorithm>
