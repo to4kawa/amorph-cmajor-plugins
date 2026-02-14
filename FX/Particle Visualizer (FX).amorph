@@ -1,0 +1,1460 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="Particle Visualizer (FX)" date="2026-02-14T09:25:40.553+09:00">
+  <PresentationConfig title="Particle Visualizer (FX)" author="to4kawa" paramCount="4"
+                      highlightColour="ffff466e" backgroundColour="ff1e1e1e" autoGenerateUiCode="0"
+                      uiScale="1.0" labWidth="1020" labHeight="750" presentationWidth="980"
+                      presentationHeight="1200">
+    <ParameterNames>
+      <Param index="0" name="Density"/>
+      <Param index="1" name="Color (1-16)"/>
+      <Param index="2" name="Color Type (1-8)"/>
+      <Param index="3" name="Particle Type"/>
+      <Param index="4" name="Param 5"/>
+      <Param index="5" name="Param 6"/>
+      <Param index="6" name="Param 7"/>
+      <Param index="7" name="Param 8"/>
+      <Param index="8" name="Param 9"/>
+      <Param index="9" name="Param 10"/>
+      <Param index="10" name="Param 11"/>
+      <Param index="11" name="Param 12"/>
+      <Param index="12" name="Param 13"/>
+      <Param index="13" name="Param 14"/>
+      <Param index="14" name="Param 15"/>
+      <Param index="15" name="Param 16"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>processor ParticleVisualizerOnlyFX
+{
+    input  stream float&lt;2&gt; in;
+    output stream float&lt;2&gt; out;
+
+    input event float param1 [[ name: &quot;Density&quot;, min: 0.0, max: 1.0, init: 0.55, step: 0.01 ]];
+    input event float param2 [[ name: &quot;Genre&quot;,   min: 0.0, max: 1.0, init: 0.30, step: 0.01 ]];
+    input event float param3 [[ name: &quot;Temp&quot;,    min: 0.0, max: 1.0, init: 0.50, step: 0.01 ]];
+    input event float param4 [[ name: &quot;Shape&quot;,   min: 0.0, max: 3.0, init: 0.0,  step: 1.0  ]];
+
+    float density = 0.55f;
+    float colorIndex = 8.0f;      // 1..16
+    float schemeIndex = 3.0f;     // 1..8
+    float shapeIndex = 0.0f;      // 0..3
+
+    event param1 (float v) { density = v; }
+    event param2 (float v) { colorIndex = v; }
+    event param3 (float v) { schemeIndex = v; }
+    event param4 (float v) { shapeIndex = v; }
+
+    void main()
+    {
+        loop
+        {
+            float&lt;2&gt; dry = in;
+            float keepAlive = (density + colorIndex + schemeIndex + shapeIndex) * 0.0f;
+            out &lt;- dry + float&lt;2&gt; (keepAlive, keepAlive);
+            advance();
+        }
+    }
+}</Code>
+  <UICode>// @amorph-visualizer-ui
+// Visualizer-only (1:1) + 4 knobs
+// param1 Density (0..1)
+// param2 Genre  (0..1)  -&gt; quantize to dictionaries
+// param3 Temp   (0..1)  -&gt; warm(0) .. cold(1) within chosen dictionary
+// param4 Shape  (0..3)  -&gt; 0 circle, 1 triangle, 2 square, 3 star
+//
+// Implements: Dictionary &#215; Temperature Band &#215; Weighted Pick + &quot;Lost Jump&quot; + Similarity Avoidance
+// Output (internal): pickedColorName + RGB (+ optional 2nd for smooth drift)
+
+class DialControl
+{
+    constructor (options)
+    {
+        this.patchConnection = options.patchConnection;
+        this.param = options.param;
+        this.knob = options.knob;
+        this.valueLabel = options.valueLabel;
+        this.formatValue = options.formatValue;
+        this.onChange = options.onChange;
+        this.min = options.min;
+        this.max = options.max;
+        this.step = options.step;
+        this.defaultValue = options.defaultValue;
+
+        if (! (this.max &gt; this.min))
+        {
+            this.min = 0;
+            this.max = 1;
+        }
+
+        if (! (this.step &gt; 0))
+            this.step = (this.max - this.min) / 100;
+        if (! (this.step &gt; 0))
+            this.step = 0.01;
+
+        this.value = Number.isFinite(this.defaultValue) ? this.defaultValue : this.min;
+        this.dragging = false;
+        this.startValue = this.value;
+        this.startY = 0;
+        this.activePointerId = null;
+
+        this.knob.addEventListener(&quot;pointerdown&quot;, (e) =&gt; this.onPointerDown(e));
+        this.knob.addEventListener(&quot;pointermove&quot;, (e) =&gt; this.onPointerMove(e));
+        this.knob.addEventListener(&quot;pointerup&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;pointercancel&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;lostpointercapture&quot;, () =&gt; this.cancelDrag());
+        this.knob.addEventListener(&quot;dragstart&quot;, (e) =&gt; e.preventDefault());
+        this.knob.addEventListener(&quot;dblclick&quot;, () =&gt; this.setValue(this.defaultValue, true));
+
+        // &#9989; Fix &quot;weird default&quot;: force normalized visuals + label immediately
+        this.setValue(this.value, false);
+    }
+
+    clamp (value, min, max) { return Math.max(min, Math.min(max, value)); }
+
+    quantize (value)
+    {
+        if (!this.step || this.step &lt;= 0) return value;
+        const steps = Math.round((value - this.min) / this.step);
+        return this.min + steps * this.step;
+    }
+
+    setValue (value, notify)
+    {
+        const numericValue = Number.isFinite(value) ? value : this.defaultValue;
+        const clamped = this.clamp(this.quantize(numericValue), this.min, this.max);
+        this.value = clamped;
+        this.updateVisuals();
+
+        if (this.valueLabel)
+            this.valueLabel.textContent = this.formatValue(this.value);
+
+        if (this.onChange)
+            this.onChange(this.value);
+
+        if (notify === true)
+            this.patchConnection.sendEventOrValue(this.param, this.value);
+    }
+
+    updateVisuals()
+    {
+        const denom = (this.max - this.min);
+        const norm = denom &gt; 0 ? (this.value - this.min) / denom : 0;
+        const clampedNorm = this.clamp(norm, 0, 1);
+        const angle = -135 + clampedNorm * 270;
+        this.knob.style.setProperty(&quot;--angle&quot;, &#96;${angle}deg&#96;);
+        this.knob.style.setProperty(&quot;--norm&quot;, &#96;${clampedNorm}&#96;);
+    }
+
+    setDraggingState (isDragging)
+    {
+        this.dragging = isDragging;
+        this.knob.classList.toggle(&quot;is-dragging&quot;, isDragging);
+
+        const root = this.knob.closest(&quot;.auto-ui-root&quot;);
+        if (root)
+            root.classList.toggle(&quot;is-dragging&quot;, isDragging);
+    }
+
+    cancelDrag ()
+    {
+        this.setDraggingState(false);
+        this.activePointerId = null;
+    }
+
+    onPointerDown (e)
+    {
+        if ((e.button !== undefined &amp;&amp; e.button !== 0) || e.isPrimary === false)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.startY = e.clientY;
+        this.startValue = this.value;
+        this.activePointerId = e.pointerId;
+        this.dragging = true;
+        this.setDraggingState(true);
+
+        try { this.knob.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    onPointerMove (e)
+    {
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+
+        const delta = this.startY - e.clientY;
+        const range = this.max - this.min;
+
+        // Match the AMORPH POLY feel: slightly less sensitive than your old 170
+        const sensitivity = range / 240;
+
+        const fine = e.shiftKey ? 0.2 : 1.0;
+        const nextValue = this.startValue + delta * sensitivity * fine;
+        this.setValue(nextValue, true);
+    }
+
+    onPointerUp (e)
+    {
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.setDraggingState(false);
+        this.activePointerId = null;
+
+        try
+        {
+            if (this.knob.hasPointerCapture(e.pointerId))
+                this.knob.releasePointerCapture(e.pointerId);
+        }
+        catch (_) {}
+    }
+}
+
+// ======================================================
+// Endpoint audio normalization (compact + robust enough)
+// ======================================================
+
+function normalizeAudioChunk (payload)
+{
+    const result = { mono: null, sampleRate: undefined };
+
+    const setSampleRate = (sr) =&gt;
+    {
+        const n = Number(sr);
+        if (Number.isFinite(n) &amp;&amp; n &gt; 1000 &amp;&amp; n &lt; 768000)
+            result.sampleRate = n;
+    };
+
+    const i16ToF32 = (i16) =&gt;
+    {
+        const f = new Float32Array(i16.length);
+        for (let i = 0; i &lt; i16.length; i++)
+            f[i] = i16[i] / 32768;
+        return f;
+    };
+
+    const toF32 = (x) =&gt;
+    {
+        if (!x) return null;
+        if (x instanceof Float32Array) return x;
+        if (x instanceof Int16Array) return i16ToF32(x);
+
+        if (x instanceof ArrayBuffer)
+        {
+            if ((x.byteLength % 4) === 0) return new Float32Array(x);
+            if ((x.byteLength % 2) === 0) return i16ToF32(new Int16Array(x));
+            return null;
+        }
+
+        if (ArrayBuffer.isView(x))
+        {
+            if (x instanceof DataView) return null;
+            if (x instanceof Float32Array) return x;
+            if (x instanceof Int16Array) return i16ToF32(x);
+
+            if ((x.byteLength % 4) === 0)
+                return new Float32Array(x.buffer, x.byteOffset, Math.floor(x.byteLength / 4));
+
+            const out = new Float32Array(x.length || 0);
+            for (let i = 0; i &lt; out.length; i++)
+                out[i] = Number(x[i]) || 0;
+            return out;
+        }
+
+        if (Array.isArray(x))
+        {
+            const out = new Float32Array(x.length);
+            for (let i = 0; i &lt; out.length; i++)
+                out[i] = Number(x[i]) || 0;
+            return out;
+        }
+
+        return null;
+    };
+
+    const toMonoFromChannels = (channels) =&gt;
+    {
+        if (!Array.isArray(channels) || channels.length === 0) return null;
+
+        const a = toF32(channels[0]);
+        const b = toF32(channels[1] ?? channels[0]);
+        if (!a || !b) return null;
+
+        const n = Math.min(a.length, b.length);
+        if (!(n &gt; 0)) return null;
+
+        const mono = new Float32Array(n);
+        for (let i = 0; i &lt; n; i++)
+            mono[i] = 0.5 * ((a[i] || 0) + (b[i] || 0));
+
+        return mono;
+    };
+
+    const walk = (node) =&gt;
+    {
+        if (node == null) return null;
+
+        if (node.sampleRate != null) setSampleRate(node.sampleRate);
+
+        if (node.left != null &amp;&amp; node.right != null)
+        {
+            const m = toMonoFromChannels([node.left, node.right]);
+            if (m) return m;
+        }
+
+        for (const k of [&quot;data&quot;, &quot;samples&quot;, &quot;frames&quot;, &quot;audio&quot;, &quot;pcm&quot;, &quot;buffer&quot;])
+        {
+            if (node[k] != null)
+            {
+                if (Array.isArray(node[k]) &amp;&amp; (Array.isArray(node[k][0]) || ArrayBuffer.isView(node[k][0])))
+                {
+                    const m = toMonoFromChannels(node[k]);
+                    if (m) return m;
+                }
+
+                const f = toF32(node[k]);
+                if (f) return f;
+            }
+        }
+
+        const direct = toF32(node);
+        if (direct) return direct;
+
+        if (typeof node === &quot;object&quot;)
+        {
+            for (const k of [&quot;payload&quot;, &quot;value&quot;, &quot;chunk&quot;, &quot;detail&quot;, &quot;event&quot;])
+            {
+                if (node[k] != null)
+                {
+                    const m = walk(node[k]);
+                    if (m) return m;
+                }
+            }
+        }
+
+        return null;
+    };
+
+    result.mono = walk(payload);
+    return result;
+}
+
+// ======================================================
+// Simple FFT (radix-2, real input)
+// ======================================================
+
+class FFT
+{
+    constructor (fftSize)
+    {
+        this.N = fftSize;
+        this.bits = Math.round(Math.log2(this.N));
+
+        this.rev = new Uint32Array(this.N);
+        for (let i = 0; i &lt; this.N; i++)
+        {
+            let x = i;
+            let y = 0;
+            for (let b = 0; b &lt; this.bits; b++)
+            {
+                y = (y &lt;&lt; 1) | (x &amp; 1);
+                x &gt;&gt;= 1;
+            }
+            this.rev[i] = y &gt;&gt;&gt; 0;
+        }
+
+        this.cos = new Float32Array(this.N / 2);
+        this.sin = new Float32Array(this.N / 2);
+        for (let k = 0; k &lt; this.N / 2; k++)
+        {
+            const a = -2 * Math.PI * k / this.N;
+            this.cos[k] = Math.cos(a);
+            this.sin[k] = Math.sin(a);
+        }
+
+        this.re = new Float32Array(this.N);
+        this.im = new Float32Array(this.N);
+
+        this.win = new Float32Array(this.N);
+        for (let i = 0; i &lt; this.N; i++)
+            this.win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (this.N - 1));
+    }
+
+    forwardReal (x)
+    {
+        const N = this.N;
+
+        for (let i = 0; i &lt; N; i++)
+        {
+            const j = this.rev[i];
+            this.re[i] = (x[j] || 0) * this.win[j];
+            this.im[i] = 0;
+        }
+
+        for (let size = 2; size &lt;= N; size &lt;&lt;= 1)
+        {
+            const half = size &gt;&gt;&gt; 1;
+            const step = N / size;
+
+            for (let i = 0; i &lt; N; i += size)
+            {
+                let k = 0;
+                for (let j = 0; j &lt; half; j++)
+                {
+                    const tRe = this.re[i + j + half];
+                    const tIm = this.im[i + j + half];
+
+                    const c = this.cos[k];
+                    const s = this.sin[k];
+
+                    const mRe = tRe * c - tIm * s;
+                    const mIm = tRe * s + tIm * c;
+
+                    const uRe = this.re[i + j];
+                    const uIm = this.im[i + j];
+
+                    this.re[i + j] = uRe + mRe;
+                    this.im[i + j] = uIm + mIm;
+                    this.re[i + j + half] = uRe - mRe;
+                    this.im[i + j + half] = uIm - mIm;
+
+                    k += step;
+                }
+            }
+        }
+
+        return { re: this.re, im: this.im };
+    }
+}
+
+// ======================================================
+// Visualizer: Dictionary &#215; Temp Band &#215; Weighted Pick (+ Lost Jump)
+// ======================================================
+
+function clamp01 (x) { return Math.max(0, Math.min(1, x)); }
+function lerp (a, b, t) { return a + (b - a) * t; }
+
+function quantizeIndex01 (x01, count)
+{
+    if (!(count &gt; 1)) return 0;
+    const t = clamp01(x01);
+    return Math.max(0, Math.min(count - 1, Math.round(t * (count - 1))));
+}
+
+function gaussianBandWeight (tempPos, tempTarget, sigma)
+{
+    const d = tempPos - tempTarget;
+    const denom = 2 * sigma * sigma;
+    return Math.exp(-(d * d) / Math.max(1e-9, denom));
+}
+
+function rgbToString (rgb, alpha)
+{
+    const r = Math.max(0, Math.min(255, Math.round(rgb[0] || 0)));
+    const g = Math.max(0, Math.min(255, Math.round(rgb[1] || 0)));
+    const b = Math.max(0, Math.min(255, Math.round(rgb[2] || 0)));
+    return &#96;rgba(${r}, ${g}, ${b}, ${alpha})&#96;;
+}
+
+function rgbDistance (a, b)
+{
+    const dr = (a[0] || 0) - (b[0] || 0);
+    const dg = (a[1] || 0) - (b[1] || 0);
+    const db = (a[2] || 0) - (b[2] || 0);
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
+function makeGenres ()
+{
+    // tempPos: 0 warm .. 1 cold
+    // weightBase: dictionary personality
+    return [
+        {
+            label: &quot;Gems&quot;,
+            colors: [
+                { name: &quot;Amber&quot;,      rgb: [255, 166,  74], tempPos: 0.08, weightBase: 1.00 },
+                { name: &quot;Garnet&quot;,     rgb: [155,  24,  49], tempPos: 0.18, weightBase: 0.85 },
+                { name: &quot;Citrine&quot;,    rgb: [245, 196,  66], tempPos: 0.16, weightBase: 0.95 },
+                { name: &quot;Rose Quartz&quot;,rgb: [234, 154, 174], tempPos: 0.28, weightBase: 0.80 },
+                { name: &quot;Jade&quot;,       rgb: [ 80, 184, 126], tempPos: 0.52, weightBase: 0.85 },
+                { name: &quot;Peridot&quot;,    rgb: [173, 226,  64], tempPos: 0.44, weightBase: 0.75 },
+                { name: &quot;Opal&quot;,       rgb: [210, 226, 231], tempPos: 0.62, weightBase: 0.70 },
+                { name: &quot;Aquamarine&quot;, rgb: [ 96, 200, 218], tempPos: 0.74, weightBase: 0.80 },
+                { name: &quot;Sapphire&quot;,   rgb: [ 35,  87, 205], tempPos: 0.90, weightBase: 0.95 },
+                { name: &quot;Amethyst&quot;,   rgb: [151,  90, 214], tempPos: 0.80, weightBase: 0.85 },
+                { name: &quot;Silver&quot;,     rgb: [200, 206, 214], tempPos: 0.78, weightBase: 0.70 },
+                { name: &quot;Ice&quot;,        rgb: [180, 240, 255], tempPos: 0.98, weightBase: 0.78 }
+            ]
+        },
+        {
+            label: &quot;Plants&quot;,
+            colors: [
+                { name: &quot;Marigold&quot;,   rgb: [246, 168,  52], tempPos: 0.12, weightBase: 0.90 },
+                { name: &quot;Terracotta&quot;, rgb: [197,  92,  64], tempPos: 0.18, weightBase: 0.80 },
+                { name: &quot;Blush&quot;,      rgb: [238, 151, 156], tempPos: 0.28, weightBase: 0.78 },
+                { name: &quot;Leaf&quot;,       rgb: [ 88, 170,  88], tempPos: 0.50, weightBase: 1.05 },
+                { name: &quot;Moss&quot;,       rgb: [ 78, 120,  76], tempPos: 0.58, weightBase: 0.85 },
+                { name: &quot;Mint&quot;,       rgb: [131, 224, 190], tempPos: 0.66, weightBase: 0.78 },
+                { name: &quot;Eucalyptus&quot;, rgb: [ 99, 173, 161], tempPos: 0.72, weightBase: 0.80 },
+                { name: &quot;Lavender&quot;,   rgb: [173, 142, 230], tempPos: 0.78, weightBase: 0.70 },
+                { name: &quot;Bluebell&quot;,   rgb: [ 92, 126, 235], tempPos: 0.86, weightBase: 0.72 },
+                { name: &quot;Night Fern&quot;, rgb: [ 33,  60,  58], tempPos: 0.90, weightBase: 0.60 }
+            ]
+        },
+        {
+            label: &quot;Materials&quot;,
+            colors: [
+                { name: &quot;Brass&quot;,      rgb: [210, 171,  63], tempPos: 0.16, weightBase: 0.95 },
+                { name: &quot;Copper&quot;,     rgb: [187,  88,  53], tempPos: 0.20, weightBase: 0.90 },
+                { name: &quot;Leather&quot;,    rgb: [141,  84,  52], tempPos: 0.30, weightBase: 0.80 },
+                { name: &quot;Concrete&quot;,   rgb: [150, 156, 162], tempPos: 0.62, weightBase: 0.85 },
+                { name: &quot;Steel&quot;,      rgb: [170, 178, 190], tempPos: 0.74, weightBase: 0.95 },
+                { name: &quot;Carbon&quot;,     rgb: [ 44,  49,  58], tempPos: 0.82, weightBase: 0.75 },
+                { name: &quot;Ceramic&quot;,    rgb: [224, 230, 235], tempPos: 0.70, weightBase: 0.70 },
+                { name: &quot;Titanium&quot;,   rgb: [188, 200, 214], tempPos: 0.86, weightBase: 0.82 },
+                { name: &quot;Glass&quot;,      rgb: [165, 232, 238], tempPos: 0.92, weightBase: 0.72 }
+            ]
+        },
+        {
+            label: &quot;Foods&quot;,
+            colors: [
+                { name: &quot;Mango&quot;,      rgb: [255, 163,  63], tempPos: 0.10, weightBase: 1.00 },
+                { name: &quot;Chili&quot;,      rgb: [200,  28,  34], tempPos: 0.12, weightBase: 0.75 },
+                { name: &quot;Honey&quot;,      rgb: [245, 197,  74], tempPos: 0.18, weightBase: 0.95 },
+                { name: &quot;Caramel&quot;,    rgb: [194, 112,  61], tempPos: 0.24, weightBase: 0.90 },
+                { name: &quot;Mocha&quot;,      rgb: [124,  78,  59], tempPos: 0.34, weightBase: 0.78 },
+                { name: &quot;Matcha&quot;,     rgb: [108, 170,  72], tempPos: 0.52, weightBase: 0.88 },
+                { name: &quot;Soda&quot;,       rgb: [ 92, 205, 210], tempPos: 0.76, weightBase: 0.78 },
+                { name: &quot;Blueberry&quot;,  rgb: [ 68,  92, 210], tempPos: 0.88, weightBase: 0.90 },
+                { name: &quot;Ice Milk&quot;,   rgb: [220, 238, 245], tempPos: 0.96, weightBase: 0.70 }
+            ]
+        },
+        {
+            label: &quot;Neon&quot;,
+            colors: [
+                { name: &quot;Neon Amber&quot;, rgb: [255, 184,  51], tempPos: 0.14, weightBase: 0.85 },
+                { name: &quot;Neon Pink&quot;,  rgb: [255,  72, 196], tempPos: 0.34, weightBase: 1.10 },
+                { name: &quot;Neon Lime&quot;,  rgb: [178, 255,  51], tempPos: 0.46, weightBase: 0.95 },
+                { name: &quot;Neon Cyan&quot;,  rgb: [ 65, 245, 255], tempPos: 0.74, weightBase: 1.05 },
+                { name: &quot;Neon Blue&quot;,  rgb: [ 56, 120, 255], tempPos: 0.88, weightBase: 0.98 },
+                { name: &quot;Neon Violet&quot;,rgb: [160,  74, 255], tempPos: 0.84, weightBase: 0.90 }
+            ]
+        },
+        {
+            label: &quot;Pastels&quot;,
+            colors: [
+                { name: &quot;Peach&quot;,      rgb: [255, 198, 170], tempPos: 0.18, weightBase: 1.00 },
+                { name: &quot;Butter&quot;,     rgb: [252, 238, 170], tempPos: 0.22, weightBase: 0.92 },
+                { name: &quot;Lilac&quot;,      rgb: [214, 188, 255], tempPos: 0.72, weightBase: 0.92 },
+                { name: &quot;Sky&quot;,        rgb: [188, 226, 255], tempPos: 0.92, weightBase: 0.98 },
+                { name: &quot;Mint Cream&quot;, rgb: [204, 252, 230], tempPos: 0.86, weightBase: 0.88 },
+                { name: &quot;Fog&quot;,        rgb: [230, 236, 244], tempPos: 0.78, weightBase: 0.82 }
+            ]
+        }
+    ];
+}
+
+function pickWeightedIndex (weights)
+{
+    let sum = 0;
+    for (let i = 0; i &lt; weights.length; i++)
+        sum += Math.max(0, weights[i] || 0);
+
+    if (!(sum &gt; 0))
+        return Math.max(0, Math.min(weights.length - 1, Math.floor(Math.random() * weights.length)));
+
+    let r = Math.random() * sum;
+    for (let i = 0; i &lt; weights.length; i++)
+    {
+        r -= Math.max(0, weights[i] || 0);
+        if (r &lt;= 0)
+            return i;
+    }
+
+    return weights.length - 1;
+}
+
+function neighborIndex (idx, len, dir)
+{
+    if (!(len &gt; 0)) return 0;
+    const d = dir &gt;= 0 ? 1 : -1;
+    return Math.max(0, Math.min(len - 1, idx + d));
+}
+
+function starPath (ctx, cx, cy, r, points)
+{
+    const spikes = Math.max(4, Math.min(8, points | 0));
+    const inner = r * 0.46;
+    let rot = Math.PI / 2 * 3;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - r);
+
+    for (let i = 0; i &lt; spikes; i++)
+    {
+        const x1 = cx + Math.cos(rot) * r;
+        const y1 = cy + Math.sin(rot) * r;
+        ctx.lineTo(x1, y1);
+        rot += Math.PI / spikes;
+
+        const x2 = cx + Math.cos(rot) * inner;
+        const y2 = cy + Math.sin(rot) * inner;
+        ctx.lineTo(x2, y2);
+        rot += Math.PI / spikes;
+    }
+
+    ctx.closePath();
+}
+
+class ParticleVisualizer
+{
+    constructor (canvas, labelEl)
+    {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext(&quot;2d&quot;, { alpha: true, desynchronized: true });
+        this.labelEl = labelEl;
+
+        this.genres = makeGenres();
+
+        this.fftSize = 2048;
+        this.hop = 512;
+        this.ring = new Float32Array(this.fftSize * 4);
+        this.rw = 0;
+        this.rc = 0;
+        this.frame = new Float32Array(this.fftSize);
+        this.fft = new FFT(this.fftSize);
+        this.mag = new Float32Array(this.fftSize &gt;&gt; 1);
+
+        this.energy = 0;
+        this.energySmooth = 0;
+
+        this.particles = [];
+        this.maxParticles = 2400;
+
+        this.params = {
+            density: 0.55,
+            knobGenre: 0.30,
+            knobTemp: 0.50,
+            shapeIndex: 0
+        };
+
+        // pick state
+        this.sigma = 0.18;          // &quot;&#22806;&#12428;&#12395;&#12367;&#12373;&quot;
+        this.pLostBase = 0.07;      // &#36855;&#23376;&#29575;&#12398;&#20013;&#24515;
+        this.lastPicked = [];       // recent RGBs
+        this.lastTemp = this.params.knobTemp;
+
+        this.picked = {
+            genreIndex: 0,
+            mainIndex: 0,
+            secondIndex: 1,
+            name: &quot;&quot;,
+            rgb: [255, 255, 255],
+            rgb2: [200, 220, 255],
+            mix: 0
+        };
+
+        this.pickTimer = 0;
+        this.pickInterval = 0.90;   // seconds (acts like &quot;1&#23567;&#31680;&#12372;&#12392;&quot;&#12398;&#20195;&#26367;)
+        this.tempDeltaSmooth = 0;
+
+        this._raf = 0;
+        this._lastT = 0;
+
+        this.ro = new ResizeObserver(() =&gt; this.resizeToSquare());
+        this.ro.observe(canvas);
+        this.resizeToSquare();
+
+        // initial pick
+        this.updatePick(true);
+
+        this.loop = (t) =&gt;
+        {
+            this._raf = requestAnimationFrame(this.loop);
+            const dtMs = (t - this._lastT) || 16.7;
+            this._lastT = t;
+            const dt = Math.max(0.001, Math.min(0.050, dtMs / 1000));
+            this.draw(dt);
+        };
+
+        this._raf = requestAnimationFrame(this.loop);
+    }
+
+    destroy ()
+    {
+        cancelAnimationFrame(this._raf);
+        this._raf = 0;
+        try { this.ro.disconnect(); } catch (_) {}
+    }
+
+    wake ()
+    {
+        this.resizeToSquare();
+        if (!this._raf)
+        {
+            this._lastT = 0;
+            this._raf = requestAnimationFrame(this.loop);
+        }
+    }
+
+    setParam (name, v)
+    {
+        if (name === &quot;density&quot;) this.params.density = clamp01(v);
+        if (name === &quot;knobGenre&quot;) { this.params.knobGenre = clamp01(v); this.updatePick(false); }
+        if (name === &quot;knobTemp&quot;)  { this.params.knobTemp  = clamp01(v); /* pick on timer / change */ }
+        if (name === &quot;shapeIndex&quot;) this.params.shapeIndex = v;
+    }
+
+    resizeToSquare ()
+    {
+        const rect = this.canvas.getBoundingClientRect();
+        const side = Math.max(1, Math.floor(Math.min(rect.width, rect.height)));
+        const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+        const w = Math.floor(side * dpr);
+        const h = Math.floor(side * dpr);
+
+        if (this.canvas.width !== w || this.canvas.height !== h)
+        {
+            this.canvas.width = w;
+            this.canvas.height = h;
+        }
+    }
+
+    pushMonoSamples (mono)
+    {
+        for (let i = 0; i &lt; mono.length; i++)
+        {
+            this.ring[this.rw] = mono[i];
+            this.rw = (this.rw + 1) % this.ring.length;
+            this.rc = Math.min(this.ring.length, this.rc + 1);
+        }
+
+        while (this.rc &gt;= this.fftSize)
+        {
+            const start = (this.rw - this.fftSize + this.ring.length) % this.ring.length;
+            for (let i = 0; i &lt; this.fftSize; i++)
+                this.frame[i] = this.ring[(start + i) % this.ring.length];
+
+            this.computeEnergy();
+            this.rc = Math.max(0, this.rc - this.hop);
+        }
+    }
+
+    computeEnergy ()
+    {
+        const { re, im } = this.fft.forwardReal(this.frame);
+        const bins = this.mag.length;
+        const invN = 1.0 / this.fftSize;
+
+        let sum = 0;
+        const lo = Math.floor(bins * 0.06);
+        const hi = Math.floor(bins * 0.55);
+
+        for (let i = 0; i &lt; bins; i++)
+        {
+            const rr = re[i] * invN;
+            const ii = im[i] * invN;
+            const m = Math.sqrt(rr * rr + ii * ii);
+            this.mag[i] = m;
+            if (i &gt;= lo &amp;&amp; i &lt;= hi) sum += m;
+        }
+
+        const mean = sum / Math.max(1, (hi - lo + 1));
+        const e = clamp01((Math.log10(1e-6 + mean) + 5.2) / 1.25);
+        this.energy = e;
+    }
+
+    updatePick (force)
+    {
+        const G = this.genres.length;
+
+        // 1) genre selection
+        let gIdx = quantizeIndex01(this.params.knobGenre, G);
+
+        // 3) lost jump (before weighted pick)
+        const pLost = lerp(0.03, 0.12, clamp01(this.pLostBase + this.energySmooth * 0.6));
+        if (Math.random() &lt; pLost)
+        {
+            const dir = Math.random() &lt; 0.5 ? -1 : 1;
+            gIdx = Math.max(0, Math.min(G - 1, gIdx + dir));
+        }
+
+        const genre = this.genres[gIdx];
+        const colors = genre.colors;
+        const temp = this.params.knobTemp;
+
+        // 2) weighted pick within band
+        const weights = new Array(colors.length);
+        for (let i = 0; i &lt; colors.length; i++)
+        {
+            const c = colors[i];
+            const w = (c.weightBase ?? 1) * gaussianBandWeight(c.tempPos ?? 0.5, temp, this.sigma);
+            weights[i] = w;
+        }
+
+        // 4) similarity avoidance (reroll up to R)
+        const N = 6;
+        const R = 6;
+        const minDist = 34; // &#8220;&#20284;&#12377;&#12366;&#8221;&#38334;&#20516;&#65288;RGB&#36317;&#38626;&#65289;
+        const tempMove = Math.abs(temp - this.lastTemp);
+        const relax = clamp01(tempMove * 2.2); // TEMP&#21205;&#12363;&#12375;&#12383;&#30452;&#24460;&#12399;&#22238;&#36991;&#24369;&#12417;
+        const distThreshold = lerp(minDist, 18, relax);
+
+        let mainIdx = pickWeightedIndex(weights);
+        let tries = 0;
+
+        while (tries &lt; R &amp;&amp; this.lastPicked.length &gt; 0)
+        {
+            const rgb = colors[mainIdx].rgb;
+            let tooClose = false;
+
+            for (let k = 0; k &lt; Math.min(N, this.lastPicked.length); k++)
+            {
+                const prev = this.lastPicked[this.lastPicked.length - 1 - k];
+                if (rgbDistance(rgb, prev) &lt; distThreshold)
+                {
+                    tooClose = true;
+                    break;
+                }
+            }
+
+            if (!tooClose)
+                break;
+
+            mainIdx = pickWeightedIndex(weights);
+            tries++;
+        }
+
+        // 5) neighbor slide (optional): pick 2nd from neighbors
+        const dir = (temp - (colors[mainIdx].tempPos ?? 0.5)) &gt;= 0 ? 1 : -1;
+        const secondIdx = neighborIndex(mainIdx, colors.length, dir);
+
+        const main = colors[mainIdx];
+        const second = colors[secondIdx] ?? main;
+
+        // store history
+        this.lastPicked.push(main.rgb);
+        if (this.lastPicked.length &gt; 12)
+            this.lastPicked.shift();
+
+        this.picked.genreIndex = gIdx;
+        this.picked.mainIndex = mainIdx;
+        this.picked.secondIndex = secondIdx;
+        this.picked.name = &#96;${genre.label}: ${main.name}&#96;;
+        this.picked.rgb = main.rgb;
+        this.picked.rgb2 = second.rgb;
+
+        if (this.labelEl)
+            this.labelEl.textContent = this.picked.name;
+
+        if (force)
+            this.picked.mix = 0;
+    }
+
+    spawn (count)
+    {
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+
+        for (let i = 0; i &lt; count; i++)
+        {
+            if (this.particles.length &gt;= this.maxParticles)
+                break;
+
+            const a = Math.random() * Math.PI * 2;
+            const r = (Math.random() ** 0.45) * 0.45;
+            const cx = w * 0.5;
+            const cy = h * 0.5;
+
+            const px = cx + Math.cos(a) * (w * r);
+            const py = cy + Math.sin(a) * (h * r);
+
+            const sp = lerp(30, 240, Math.random()) * (0.7 + this.energySmooth * 1.2);
+            const vx = Math.cos(a) * sp + (Math.random() - 0.5) * 30;
+            const vy = Math.sin(a) * sp + (Math.random() - 0.5) * 30;
+
+            const size = lerp(2.0, 10.0, Math.random()) * (0.75 + this.energySmooth * 1.15);
+            const life = lerp(0.45, 1.65, Math.random()) * (0.7 + this.energySmooth * 0.9);
+
+            // per-particle palette jitter (stable)
+            const tint = (Math.random() - 0.5) * 0.14;
+
+            this.particles.push({
+                x: px, y: py,
+                vx, vy,
+                size,
+                life,
+                age: 0,
+                spin: (Math.random() - 0.5) * 10,
+                rot: Math.random() * Math.PI * 2,
+                tint
+            });
+        }
+    }
+
+    drawParticle (ctx, p, shapeIndex, fillStyle)
+    {
+        ctx.fillStyle = fillStyle;
+
+        const x = p.x;
+        const y = p.y;
+        const r = p.size;
+        const s = Math.max(0, Math.min(3, Math.round(shapeIndex)));
+
+        if (s === 0)
+        {
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(p.rot);
+
+        if (s === 1)
+        {
+            ctx.beginPath();
+            ctx.moveTo(0, -r);
+            ctx.lineTo(r * 0.9, r * 0.8);
+            ctx.lineTo(-r * 0.9, r * 0.8);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+            return;
+        }
+
+        if (s === 2)
+        {
+            ctx.beginPath();
+            ctx.rect(-r, -r, r * 2, r * 2);
+            ctx.fill();
+            ctx.restore();
+            return;
+        }
+
+        ctx.beginPath();
+        starPath(ctx, 0, 0, r, 5);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    blendedRGB (a, b, t)
+    {
+        const tt = clamp01(t);
+        return [
+            lerp(a[0], b[0], tt),
+            lerp(a[1], b[1], tt),
+            lerp(a[2], b[2], tt)
+        ];
+    }
+
+    draw (dt)
+    {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+
+        // energy smoothing
+        this.energySmooth = this.energySmooth * 0.86 + this.energy * 0.14;
+
+        // temp change tracking (for smooth drift + trigger)
+        const temp = this.params.knobTemp;
+        const tempDelta = Math.abs(temp - this.lastTemp);
+        this.tempDeltaSmooth = this.tempDeltaSmooth * 0.88 + tempDelta * 0.12;
+
+        // trigger: periodic, or temp moved enough
+        this.pickTimer += dt;
+        const tempTrigger = this.tempDeltaSmooth &gt; 0.015;
+        if (this.pickTimer &gt;= this.pickInterval || tempTrigger)
+        {
+            this.pickTimer = 0;
+            this.updatePick(false);
+            this.lastTemp = temp;
+        }
+
+        // neighbor slide mix: based on how far temp is from picked main's tempPos
+        const genre = this.genres[this.picked.genreIndex];
+        const main = genre.colors[this.picked.mainIndex] ?? genre.colors[0];
+        const tpos = main?.tempPos ?? 0.5;
+        const drift = clamp01(Math.abs(temp - tpos) * 2.2);
+
+        // keep it smooth over time
+        this.picked.mix = this.picked.mix * 0.86 + drift * 0.14;
+
+        // spawn rate: density + energy
+        const dens = clamp01(this.params.density);
+        const base = lerp(1, 14, dens);
+        const burst = lerp(0, 18, this.energySmooth);
+        const count = Math.floor((base + burst) * (dt / (1 / 60)));
+
+        this.spawn(count);
+
+        // fade (motion blur-ish)
+        ctx.save();
+        ctx.globalCompositeOperation = &quot;source-over&quot;;
+        ctx.fillStyle = &quot;rgba(8, 10, 16, 0.18)&quot;;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+
+        // vignette
+        ctx.save();
+        const g = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, w * 0.55);
+        g.addColorStop(0, &quot;rgba(0,0,0,0)&quot;);
+        g.addColorStop(1, &quot;rgba(0,0,0,0.42)&quot;);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+
+        // base color (picked) + neighbor drift
+        const baseRGB = this.blendedRGB(this.picked.rgb, this.picked.rgb2, this.picked.mix);
+
+        // draw particles
+        const sh = this.params.shapeIndex;
+        const alive = [];
+
+        for (let i = 0; i &lt; this.particles.length; i++)
+        {
+            const p = this.particles[i];
+            p.age += dt;
+
+            const t = p.age / Math.max(0.001, p.life);
+            if (t &gt;= 1.0)
+                continue;
+
+            p.rot += p.spin * dt;
+
+            // outward + curl
+            const curl = (this.energySmooth * 0.9 + 0.1);
+            const ax = -p.vy * 0.7 * curl;
+            const ay =  p.vx * 0.7 * curl;
+
+            p.vx += ax * dt;
+            p.vy += ay * dt;
+
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+
+            if (p.x &lt; -40 || p.x &gt; w + 40 || p.y &lt; -40 || p.y &gt; h + 40)
+                continue;
+
+            const alpha = (1 - t) * lerp(0.18, 0.62, this.energySmooth);
+
+            // tiny per-particle tint (stable, not flickery)
+            const tint = p.tint;
+            const rgb = [
+                baseRGB[0] + 70 * tint,
+                baseRGB[1] + 70 * tint,
+                baseRGB[2] + 70 * tint
+            ];
+
+            this.drawParticle(ctx, p, sh, rgbToString(rgb, alpha));
+            alive.push(p);
+        }
+
+        this.particles = alive;
+    }
+}
+
+// ======================================================
+// Patch View
+// ======================================================
+
+class VisualizerPatchView extends HTMLElement
+{
+    constructor (patchConnection)
+    {
+        super();
+        this.patchConnection = patchConnection;
+        this.className = &quot;ui-root&quot;;
+
+        this.paramSpecs = [
+            { id: &quot;param1&quot;, label: &quot;Density&quot;, min: 0, max: 1, step: 0.01, init: 0.55, kind: &quot;float&quot; },
+            { id: &quot;param2&quot;, label: &quot;Genre&quot;,   min: 0, max: 1, step: 0.01, init: 0.30, kind: &quot;float&quot; },
+            { id: &quot;param3&quot;, label: &quot;Temp&quot;,    min: 0, max: 1, step: 0.01, init: 0.50, kind: &quot;float&quot; },
+            { id: &quot;param4&quot;, label: &quot;Shape&quot;,   min: 0, max: 3, step: 1,    init: 0,    kind: &quot;shape&quot; }
+        ];
+
+        this.innerHTML = this.getHTML();
+        this.controls = new Map();
+
+        this.paramListener = null;
+        this.endpointUnsub = [];
+
+        this.visualizer = null;
+        this.endpointFrameSize = 256;
+
+        this.outputEndpointListener = (payload) =&gt;
+        {
+            const { mono } = normalizeAudioChunk(payload);
+            if (this.visualizer &amp;&amp; mono &amp;&amp; mono.length &gt; 0)
+                this.visualizer.pushMonoSamples(mono);
+        };
+
+        this.onWindowFocus = () =&gt; this.handleWake();
+        this.onPageShow = () =&gt; this.handleWake();
+        this.onVisibilityChange = () =&gt; { if (!document.hidden) this.handleWake(); };
+    }
+
+    connectedCallback()
+    {
+        const canvas = this.querySelector(&quot;.viz-canvas&quot;);
+        const label = this.querySelector(&quot;.picked-label&quot;);
+        this.visualizer = new ParticleVisualizer(canvas, label);
+
+        // ----- Dials -----
+        const controlNodes = this.querySelectorAll(&quot;.control&quot;);
+        controlNodes.forEach((controlNode) =&gt;
+        {
+            const param = controlNode.dataset.param;
+            const spec = this.paramSpecs.find((s) =&gt; s.id === param);
+            if (!spec) return;
+
+            const knob = controlNode.querySelector(&quot;.knob&quot;);
+            const valueLabel = controlNode.querySelector(&quot;.control-value&quot;);
+            if (!knob || !valueLabel) return;
+
+            const dial = new DialControl({
+                patchConnection: this.patchConnection,
+                param,
+                knob,
+                valueLabel,
+                min: Number(spec.min),
+                max: Number(spec.max),
+                step: Number(spec.step),
+                defaultValue: Number(spec.init),
+                formatValue: (value) =&gt; this.formatValue(spec, value),
+                onChange: (value) =&gt; this.onDialChange(spec, value)
+            });
+
+            this.controls.set(param, dial);
+            this.patchConnection.requestParameterValue(param);
+            this.onDialChange(spec, Number(spec.init));
+        });
+
+        this.paramListener = (event) =&gt;
+        {
+            const control = this.controls.get(event.endpointID);
+            if (!control) return;
+            control.setValue(Number(event.value), false);
+
+            const spec = this.paramSpecs.find((s) =&gt; s.id === event.endpointID);
+            if (spec)
+                this.onDialChange(spec, Number(event.value));
+        };
+        this.patchConnection.addAllParameterListener(this.paramListener);
+
+        window.addEventListener(&quot;focus&quot;, this.onWindowFocus);
+        window.addEventListener(&quot;pageshow&quot;, this.onPageShow);
+        document.addEventListener(&quot;visibilitychange&quot;, this.onVisibilityChange);
+
+        this.handleWake();
+    }
+
+    disconnectedCallback()
+    {
+        this.controls.forEach((c) =&gt; c.cancelDrag());
+
+        if (this.paramListener)
+            this.patchConnection.removeAllParameterListener(this.paramListener);
+
+        window.removeEventListener(&quot;focus&quot;, this.onWindowFocus);
+        window.removeEventListener(&quot;pageshow&quot;, this.onPageShow);
+        document.removeEventListener(&quot;visibilitychange&quot;, this.onVisibilityChange);
+
+        this.detachOutputEndpointListener();
+
+        if (this.visualizer)
+        {
+            this.visualizer.destroy();
+            this.visualizer = null;
+        }
+    }
+
+    onDialChange (spec, value)
+    {
+        if (!this.visualizer) return;
+
+        if (spec.id === &quot;param1&quot;) this.visualizer.setParam(&quot;density&quot;, value);
+        if (spec.id === &quot;param2&quot;) this.visualizer.setParam(&quot;knobGenre&quot;, value);
+        if (spec.id === &quot;param3&quot;) this.visualizer.setParam(&quot;knobTemp&quot;, value);
+        if (spec.id === &quot;param4&quot;) this.visualizer.setParam(&quot;shapeIndex&quot;, value);
+    }
+
+    attachOutputEndpointListener()
+    {
+        this.detachOutputEndpointListener();
+
+        if (!this.patchConnection || !this.outputEndpointListener)
+            return;
+
+        const unsubOut = this.patchConnection.addEndpointListener(&quot;out&quot;, this.outputEndpointListener, this.endpointFrameSize, true);
+        if (typeof unsubOut === &quot;function&quot;)
+            this.endpointUnsub.push(unsubOut);
+    }
+
+    detachOutputEndpointListener()
+    {
+        for (const fn of this.endpointUnsub)
+            try { fn(); } catch (_) {}
+        this.endpointUnsub = [];
+
+        if (this.patchConnection &amp;&amp; this.outputEndpointListener)
+        {
+            try { this.patchConnection.removeEndpointListener(&quot;out&quot;, this.outputEndpointListener); }
+            catch (_) {}
+        }
+    }
+
+    handleWake()
+    {
+        if (this.visualizer)
+            this.visualizer.wake();
+
+        if (!document.hidden)
+            this.attachOutputEndpointListener();
+    }
+
+    getDecimals (step)
+    {
+        if (!Number.isFinite(step) || step &lt;= 0) return 2;
+        const text = String(step);
+        const dot = text.indexOf(&quot;.&quot;);
+        if (dot &lt; 0) return 0;
+        return Math.min(6, text.length - dot - 1);
+    }
+
+    formatValue (spec, value)
+    {
+        const min = Number.isFinite(spec.min) ? spec.min : 0;
+        const max = Number.isFinite(spec.max) ? spec.max : 1;
+        const v = Math.max(min, Math.min(max, Number.isFinite(value) ? value : spec.init));
+
+        if (spec.kind === &quot;shape&quot;)
+        {
+            const idx = Math.max(0, Math.min(3, Math.round(v)));
+            return [&quot;Circle&quot;, &quot;Triangle&quot;, &quot;Square&quot;, &quot;Star&quot;][idx] ?? String(idx);
+        }
+
+        const decimals = this.getDecimals(spec.step);
+        return v.toFixed(decimals);
+    }
+
+    escapeHTML (text)
+    {
+        return String(text)
+            .replaceAll(&quot;&amp;&quot;, &quot;&amp;amp;&quot;)
+            .replaceAll(&quot;&lt;&quot;, &quot;&amp;lt;&quot;)
+            .replaceAll(&quot;&gt;&quot;, &quot;&amp;gt;&quot;)
+            .replaceAll(&quot;\&quot;&quot;, &quot;&amp;quot;&quot;)
+            .replaceAll(&quot;'&quot;, &quot;&amp;#39;&quot;);
+    }
+
+    getHTML()
+    {
+        const controls = this.paramSpecs.map((spec) =&gt;
+            &#96;&lt;div class=&quot;control&quot; data-param=&quot;${spec.id}&quot; data-min=&quot;${spec.min}&quot; data-max=&quot;${spec.max}&quot; data-step=&quot;${spec.step}&quot; data-init=&quot;${spec.init}&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;
+                    &lt;div class=&quot;knob-track&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-fill&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-core&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-pointer&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;control-value&quot;&gt;${this.formatValue(spec, spec.init)}&lt;/div&gt;
+                &lt;/div&gt;
+                &lt;div class=&quot;control-label&quot;&gt;${this.escapeHTML(spec.label)}&lt;/div&gt;
+            &lt;/div&gt;&#96;).join(&quot;&quot;);
+
+        return &#96;
+            &lt;style&gt;
+                .ui-root, .ui-root * {
+                    box-sizing: border-box;
+                    font-family: &quot;Space Grotesk&quot;, system-ui, sans-serif;
+                    user-select: none;
+                    -webkit-user-select: none;
+                }
+
+                .ui-shell {
+                    min-height: 100%;
+                    padding: 16px;
+                    color: #dfe4eb;
+                    background: radial-gradient(900px 520px at 8% -4%, #2a313c 0%, #1b212b 52%, #151a22 100%);
+                    display: grid;
+                    grid-template-rows: auto auto;
+                    gap: 14px;
+                }
+
+                .title {
+                    margin: 0;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    font-size: 12px;
+                    color: #9ca6b4;
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 10px;
+                }
+
+                .picked-label {
+                    font-size: 11px;
+                    letter-spacing: 0.03em;
+                    color: rgba(220, 232, 248, 0.85);
+                    text-transform: none;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    max-width: 70%;
+                }
+
+                .viz-wrap {
+                    position: relative;
+                    width: 100%;
+                    aspect-ratio: 1 / 1;
+                    border-radius: 16px;
+                    overflow: hidden;
+                    border: 1px solid rgba(141, 159, 184, 0.20);
+                    background: linear-gradient(180deg, rgba(10, 14, 21, 0.55), rgba(0,0,0,0.18));
+                    box-shadow: inset 0 1px 1px rgba(255,255,255,0.05);
+                }
+
+                .viz-canvas {
+                    width: 100%;
+                    height: 100%;
+                    display: block;
+                }
+
+                .controls-grid {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 14px;
+                }
+
+                @media (max-width: 720px) {
+                    .controls-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                    .picked-label { max-width: 58%; }
+                }
+
+                .control {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 8px 6px 4px;
+                }
+
+                .ui-root.is-dragging,
+                .ui-root.is-dragging * {
+                    cursor: default !important;
+                }
+
+                .knob {
+                    position: relative;
+                    width: 72px;
+                    height: 72px;
+                    --angle: -135deg;
+                    --norm: 0;
+                    touch-action: none;
+                    -webkit-tap-highlight-color: transparent;
+                }
+
+                .knob-track,
+                .knob-fill,
+                .knob-core {
+                    position: absolute;
+                    border-radius: 50%;
+                }
+
+                .knob-track,
+                .knob-fill {
+                    inset: 0;
+                    --ring-thickness: 5px;
+                    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                    mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                }
+
+                .knob-track {
+                    background: conic-gradient(from -135deg, rgba(176, 193, 216, 0.18) 0deg 270deg, transparent 270deg 360deg);
+                }
+
+                .knob-fill {
+                    background: conic-gradient(
+                        from -135deg,
+                        rgba(178, 200, 229, 0.45) 0deg,
+                        #dce7f5 calc(var(--norm) * 270deg),
+                        transparent calc(var(--norm) * 270deg) 360deg
+                    );
+                    filter: drop-shadow(0 0 5px rgba(220, 232, 248, 0.22));
+                }
+
+                .knob-core {
+                    inset: 6px;
+                    background: linear-gradient(180deg, rgba(18, 23, 32, 0.86) 0%, rgba(10, 14, 21, 0.92) 100%);
+                    border: 1px solid rgba(141, 159, 184, 0.26);
+                    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.35);
+                }
+
+                .knob-pointer {
+                    display: none !important; 
+                    pointer-events: none;
+                }
+
+                .control-value {
+                    position: absolute;
+                    inset: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: 0.03em;
+                    color: #dce7f7;
+                    text-align: center;
+                    text-shadow: 0 0 8px rgba(220, 232, 248, 0.2);
+                    pointer-events: none;
+                }
+
+                .control-label {
+                    font-size: 12px;
+                    letter-spacing: 0.05em;
+                    text-transform: uppercase;
+                    color: #c5ccd7;
+                    text-align: center;
+                    min-height: 14px;
+                }
+            &lt;/style&gt;
+
+            &lt;div class=&quot;ui-shell&quot;&gt;
+                &lt;div class=&quot;title&quot;&gt;
+                    &lt;span&gt;Visualizer&lt;/span&gt;
+                    &lt;span class=&quot;picked-label&quot;&gt;&#8212;&lt;/span&gt;
+                &lt;/div&gt;
+
+                &lt;div class=&quot;viz-wrap&quot;&gt;
+                    &lt;canvas class=&quot;viz-canvas&quot;&gt;&lt;/canvas&gt;
+                &lt;/div&gt;
+
+                &lt;div class=&quot;controls-grid&quot;&gt;${controls}&lt;/div&gt;
+            &lt;/div&gt;
+        &#96;;
+    }
+}
+
+export default function createPatchView (patchConnection)
+{
+    const name = &quot;amorph-visualizer-dict-temp-view&quot;;
+    if (!window.customElements.get(name))
+        window.customElements.define(name, VisualizerPatchView);
+
+    return new (window.customElements.get(name)) (patchConnection);
+}
+</UICode>
+</AmorphAlgorithm>
