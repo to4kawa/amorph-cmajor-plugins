@@ -24,7 +24,7 @@
       <Param index="15" name="Param 16"/>
     </ParameterNames>
   </PresentationConfig>
-  <Code>// V2 processor (FX pass-through) + 12 params
+  <Code>// V2 processor (FX pass-through) + 4 params
 processor ParticleVisualizerOnlyFX
 {
     input  stream float&lt;2&gt; in;
@@ -35,40 +35,20 @@ processor ParticleVisualizerOnlyFX
     input event float param3  [[ name: &quot;Shape&quot;,      min: 0.0, max: 1.0, init: 0.20, step: 0.01 ]];
     input event float param4  [[ name: &quot;Randomness&quot;, min: 0.0, max: 1.0, init: 0.25, step: 0.01 ]];
 
-    input event float param5  [[ name: &quot;KickGain&quot;,  min: 0.0, max: 1.0, init: 0.85, step: 0.01 ]];
-    input event float param6  [[ name: &quot;MidGain&quot;,   min: 0.0, max: 1.0, init: 0.55, step: 0.01 ]];
-    input event float param7  [[ name: &quot;HatGain&quot;,   min: 0.0, max: 1.0, init: 0.70, step: 0.01 ]];
-
-    input event float param8  [[ name: &quot;Attack&quot;,    min: 0.0, max: 1.0, init: 0.25, step: 0.01 ]];
-    input event float param9  [[ name: &quot;Release&quot;,   min: 0.0, max: 1.0, init: 0.85, step: 0.01 ]];
-
-    input event float param10 [[ name: &quot;Grout&quot;,     min: 0.0, max: 1.0, init: 0.55, step: 0.01 ]];
-    input event float param11 [[ name: &quot;Jitter&quot;,    min: 0.0, max: 1.0, init: 0.35, step: 0.01 ]];
-    input event float param12 [[ name: &quot;Sparkle&quot;,   min: 0.0, max: 1.0, init: 0.25, step: 0.01 ]];
 
     float k1=0.10f, k2=0.55f, k3=0.20f, k4=0.25f;
-    float k5=0.85f, k6=0.55f, k7=0.70f, k8=0.25f, k9=0.85f;
-    float k10=0.55f, k11=0.35f, k12=0.25f;
 
     event param1 (float v) { k1 = v; }
     event param2 (float v) { k2 = v; }
     event param3 (float v) { k3 = v; }
     event param4 (float v) { k4 = v; }
-    event param5 (float v) { k5 = v; }
-    event param6 (float v) { k6 = v; }
-    event param7 (float v) { k7 = v; }
-    event param8 (float v) { k8 = v; }
-    event param9 (float v) { k9 = v; }
-    event param10(float v) { k10 = v; }
-    event param11(float v) { k11 = v; }
-    event param12(float v) { k12 = v; }
 
     void main()
     {
         loop
         {
             float&lt;2&gt; dry = in;
-            float keepAlive = (k1+k2+k3+k4+k5+k6+k7+k8+k9+k10+k11+k12) * 0.0f;
+            float keepAlive = (k1+k2+k3+k4) * 0.0f;
             out &lt;- dry + float&lt;2&gt;(keepAlive, keepAlive);
             advance();
         }
@@ -76,7 +56,7 @@ processor ParticleVisualizerOnlyFX
 }
 </Code>
   <UICode>// @amorph-visualizer-ui
-// Visualizer-only (FX pass-through) + 12 knobs (V2: Mosaic/Tiles + Band-Reactive)
+// Visualizer-only (FX pass-through) + 4 knobs (Palette / Intensity / Shape / Randomness)
 //
 // Audio source:
 // - Listens to processor endpoint &quot;out&quot; and normalizes payload into mono (Float32/Int16/ArrayBuffer/Array)
@@ -1179,7 +1159,7 @@ class ParticleVisualizer
 }
 
 // ======================================================
-// Patch View (12 knobs)
+// Patch View (4 knobs)
 // ======================================================
 
 class VisualizerPatchView extends HTMLElement
@@ -1194,18 +1174,7 @@ class VisualizerPatchView extends HTMLElement
             { id: &quot;param1&quot;,  label: &quot;Palette&quot;,    min: 0, max: 1, step: 0.01, init: 0.10, kind: &quot;float&quot; },
             { id: &quot;param2&quot;,  label: &quot;Intensity&quot;,  min: 0, max: 1, step: 0.01, init: 0.55, kind: &quot;float&quot; },
             { id: &quot;param3&quot;,  label: &quot;Shape&quot;,      min: 0, max: 1, step: 0.01, init: 0.20, kind: &quot;float&quot; },
-            { id: &quot;param4&quot;,  label: &quot;Randomness&quot;, min: 0, max: 1, step: 0.01, init: 0.25, kind: &quot;float&quot; },
-
-            { id: &quot;param5&quot;,  label: &quot;Kick&quot;,     min: 0, max: 1, step: 0.01, init: 0.85, kind: &quot;float&quot; },
-            { id: &quot;param6&quot;,  label: &quot;Mid&quot;,      min: 0, max: 1, step: 0.01, init: 0.55, kind: &quot;float&quot; },
-            { id: &quot;param7&quot;,  label: &quot;Hat&quot;,      min: 0, max: 1, step: 0.01, init: 0.70, kind: &quot;float&quot; },
-
-            { id: &quot;param8&quot;,  label: &quot;Attack&quot;,   min: 0, max: 1, step: 0.01, init: 0.25, kind: &quot;float&quot; },
-            { id: &quot;param9&quot;,  label: &quot;Release&quot;,  min: 0, max: 1, step: 0.01, init: 0.85, kind: &quot;float&quot; },
-
-            { id: &quot;param10&quot;, label: &quot;Grout&quot;,    min: 0, max: 1, step: 0.01, init: 0.55, kind: &quot;float&quot; },
-            { id: &quot;param11&quot;, label: &quot;Jitter&quot;,   min: 0, max: 1, step: 0.01, init: 0.35, kind: &quot;float&quot; },
-            { id: &quot;param12&quot;, label: &quot;Sparkle&quot;,  min: 0, max: 1, step: 0.01, init: 0.25, kind: &quot;float&quot; }
+            { id: &quot;param4&quot;,  label: &quot;Randomness&quot;, min: 0, max: 1, step: 0.01, init: 0.25, kind: &quot;float&quot; }
         ];
 
         this.innerHTML = this.getHTML();
@@ -1312,17 +1281,6 @@ class VisualizerPatchView extends HTMLElement
         if (spec.id === &quot;param2&quot;)  this.visualizer.setParam(&quot;intensity&quot;, value);
         if (spec.id === &quot;param3&quot;)  this.visualizer.setParam(&quot;shape&quot;, value);
         if (spec.id === &quot;param4&quot;)  this.visualizer.setParam(&quot;randomness&quot;, value);
-
-        if (spec.id === &quot;param5&quot;)  this.visualizer.setParam(&quot;kickGain&quot;, value);
-        if (spec.id === &quot;param6&quot;)  this.visualizer.setParam(&quot;midGain&quot;, value);
-        if (spec.id === &quot;param7&quot;)  this.visualizer.setParam(&quot;hatGain&quot;, value);
-
-        if (spec.id === &quot;param8&quot;)  this.visualizer.setParam(&quot;attack01&quot;, value);
-        if (spec.id === &quot;param9&quot;)  this.visualizer.setParam(&quot;release01&quot;, value);
-
-        if (spec.id === &quot;param10&quot;) this.visualizer.setParam(&quot;grout&quot;, value);
-        if (spec.id === &quot;param11&quot;) this.visualizer.setParam(&quot;jitter&quot;, value);
-        if (spec.id === &quot;param12&quot;) this.visualizer.setParam(&quot;sparkle&quot;, value);
     }
 
     attachOutputEndpointListener()
