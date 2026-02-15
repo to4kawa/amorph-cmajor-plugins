@@ -869,6 +869,9 @@ class ParticleVisualizer
         this.shapePhase = 0;
         this.rot = 0;
 
+        this.bgTime = 0;
+        this.bgSweepHz = 2.0;
+
         this.maxParticles = 256;
         this.particles = new Array(this.maxParticles).fill(0).map(() => ({
             alive: false,
@@ -1294,6 +1297,7 @@ class ParticleVisualizer
         this.colorPhase += dt * lerp(0.22, 1.35, phaseCurve);
         this.shapePhase += dt * lerp(0.12, 0.8, randomCurve);
         this.rot += dt * lerp(0.05, 0.58, rotCurve);
+        this.bgTime += dt;
 
         const cx = w * 0.5;
         const cy = h * 0.5;
@@ -1309,10 +1313,31 @@ class ParticleVisualizer
         this.updateParticles(dt, w, h);
 
         ctx.clearRect(0, 0, w, h);
-        const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, w * 0.65);
-        bg.addColorStop(0, &quot;rgba(18,24,34,0.86)&quot;);
-        bg.addColorStop(1, &quot;rgba(5,8,12,0.98)&quot;);
-        ctx.fillStyle = bg;
+        const breath = (Math.sin(this.bgTime * this.bgSweepHz * Math.PI * 2) + 1) * 0.5;
+        const breathGray = Math.round(lerp(0, 5, breath));
+        const atPeak = breath &gt;= 0.985;
+
+        ctx.fillStyle = &#96;rgb(${breathGray}, ${breathGray}, ${breathGray})&#96;;
+        ctx.fillRect(0, 0, w, h);
+
+        const sweepWidth = Math.max(32, w * 0.22);
+        const sweepX = ((this.bgTime * this.bgSweepHz) % 1) * (w + sweepWidth) - sweepWidth;
+        const sweep = ctx.createLinearGradient(sweepX, 0, sweepX + sweepWidth, 0);
+
+        if (atPeak)
+        {
+            sweep.addColorStop(0, &quot;rgba(7,5,7,0)&quot;);
+            sweep.addColorStop(0.5, &quot;rgba(7,5,7,0.92)&quot;);
+            sweep.addColorStop(1, &quot;rgba(7,5,7,0)&quot;);
+        }
+        else
+        {
+            sweep.addColorStop(0, &quot;rgba(5,5,5,0)&quot;);
+            sweep.addColorStop(0.5, &quot;rgba(5,5,5,0.72)&quot;);
+            sweep.addColorStop(1, &quot;rgba(5,5,5,0)&quot;);
+        }
+
+        ctx.fillStyle = sweep;
         ctx.fillRect(0, 0, w, h);
 
         const contourPulse = 1 + Math.sin(this.colorPhase * 0.92) * (0.02 + this.stableIntensity * 0.08);
