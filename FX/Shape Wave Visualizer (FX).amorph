@@ -852,6 +852,7 @@ class ParticleVisualizer
         this.sampleRate = 48000;
         this.energy = 0;
         this.energySmooth = 0;
+        this.energySmoothPrev = 0;
 
         this.params = {
             palette: 0.10,
@@ -867,6 +868,24 @@ class ParticleVisualizer
         this.colorPhase = 0;
         this.shapePhase = 0;
         this.rot = 0;
+
+        this.maxParticles = 256;
+        this.particles = new Array(this.maxParticles).fill(0).map(() => ({
+            alive: false,
+            x: 0,
+            y: 0,
+            vx: 0,
+            vy: 0,
+            life: 0,
+            age: 0,
+            size: 0,
+            col: [0, 0, 0],
+            spin: 0,
+            rot: 0
+        }));
+        this.particleHead = 0;
+        this.spawnCooldown = 0;
+        this.randomnessSmooth = this.params.randomness;
 
         this.paletteSets = [
             [[245, 82, 118], [255, 196, 84], [139, 225, 255], [136, 102, 255]],
@@ -1066,6 +1085,146 @@ class ParticleVisualizer
         ];
     }
 
+    spawnParticles (onset, shapeId, cx, cy, baseRadius)
+    {
+        const jitter = this.randomnessSmooth;
+        const count = 1 + Math.round(onset * (4 + this.stableIntensity * 12));
+        const speedMin = 120;
+        const speedMax = 620;
+        const lifeBase = lerp(0.35, 1.2, 0.2 + this.stableIntensity * 0.8);
+        const spread = lerp(0.65, 1.0, jitter);
+        const tangentialMix = shapeId === 3 ? (0.04 + jitter * 0.12) : 0;
+
+        for (let i = 0; i &lt; count; i++)
+        {
+            const p = this.particles[this.particleHead];
+            this.particleHead = (this.particleHead + 1) % this.maxParticles;
+
+            const thetaBase = Math.random() * Math.PI * 2;
+            const theta = thetaBase + (Math.random() - 0.5) * (1.0 - spread) * Math.PI;
+            const speed = lerp(speedMin, speedMax, this.stableIntensity) * lerp(0.6, 1.4, Math.random());
+            const dirX = Math.cos(theta);
+            const dirY = Math.sin(theta);
+            const tanX = -dirY;
+            const tanY = dirX;
+
+            p.alive = true;
+            p.age = 0;
+            p.life = lifeBase * lerp(0.78, 1.22, Math.random() * (0.7 + jitter * 0.3));
+            p.size = lerp(1.5, 6.5, this.stableIntensity) * lerp(0.75, 1.25, Math.random());
+            p.rot = Math.random() * Math.PI * 2;
+            p.spin = (Math.random() - 0.5) * (1.4 + jitter * 2.2);
+
+            const startOffset = baseRadius * (0.02 + Math.random() * 0.03);
+            p.x = cx + dirX * startOffset;
+            p.y = cy + dirY * startOffset;
+            p.vx = (dirX + tanX * tangentialMix) * speed;
+            p.vy = (dirY + tanY * tangentialMix) * speed;
+
+            const colorJitter = (Math.random() - 0.5) * 0.25 * jitter;
+            p.col = this.paletteColor((Math.random() + colorJitter + 1) % 1);
+        }
+    }
+
+    updateParticles (dt, w, h)
+    {
+        const drag = lerp(0.9, 2.2, this.randomnessSmooth);
+        const damp = Math.max(0, 1 - drag * dt);
+        const margin = 24;
+
+        for (let i = 0; i &lt; this.particles.length; i++)
+        {
+            const p = this.particles[i];
+            if (!p.alive) continue;
+
+            p.vx *= damp;
+            p.vy *= damp;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.rot += p.spin * dt;
+            p.age += dt;
+
+            if (p.age &gt;= p.life
+                || p.x &lt; -margin || p.x &gt; (w + margin)
+                || p.y &lt; -margin || p.y &gt; (h + margin))
+            {
+                p.alive = false;
+            }
+        }
+    }
+
+    drawParticleShape (ctx, p, shapeId)
+    {
+        if (shapeId === 1)
+        {
+            ctx.arc(0, 0, p.size, 0, Math.PI * 2);
+            return;
+        }
+
+        if (shapeId === 2)
+        {
+            const s = p.size * 1.65;
+            ctx.rect(-s * 0.5, -s * 0.5, s, s);
+            return;
+        }
+
+        if (shapeId === 0)
+        {
+            const r = p.size * 1.3;
+            ctx.moveTo(0, -r);
+            ctx.lineTo(r * 0.86, r * 0.5);
+            ctx.lineTo(-r * 0.86, r * 0.5);
+            ctx.closePath();
+            return;
+        }
+
+        const spikes = 5;
+        const outer = p.size * 1.45;
+        const inner = outer * 0.5;
+        for (let i = 0; i &lt; spikes * 2; i++)
+        {
+            const rr = (i % 2 === 0) ? outer : inner;
+            const a = -Math.PI * 0.5 + i * (Math.PI / spikes);
+            const x = Math.cos(a) * rr;
+            const y = Math.sin(a) * rr;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+    }
+
+    drawParticles (ctx, shapeId)
+    {
+        const glowBoost = 0.45 + this.stableIntensity * 0.85;
+        const blurMin = 4;
+        const blurMax = 18;
+
+        for (let i = 0; i &lt; this.particles.length; i++)
+        {
+            const p = this.particles[i];
+            if (!p.alive) continue;
+
+            const lifeT = clamp01(p.age / Math.max(0.001, p.life));
+            const alpha = (1 - lifeT) * (0.20 + this.stableIntensity * 0.8);
+            if (alpha &lt;= 0.002) continue;
+
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(p.rot);
+            ctx.beginPath();
+            this.drawParticleShape(ctx, p, shapeId);
+
+            const col = p.col;
+            ctx.fillStyle = rgbToString(col, alpha * glowBoost);
+            ctx.shadowColor = rgbToString(col, alpha * 0.9);
+            ctx.shadowBlur = lerp(blurMin, blurMax, clamp01((p.size - 1.5) / 5.0));
+            ctx.fill();
+            ctx.restore();
+        }
+
+        ctx.shadowBlur = 0;
+    }
+
     draw (dt)
     {
         const ctx = this.ctx;
@@ -1073,6 +1232,10 @@ class ParticleVisualizer
         const h = this.canvas.height;
 
         this.energySmooth = this.smoothToward(this.energySmooth, this.energy, 7.5, dt);
+        this.randomnessSmooth = this.smoothToward(this.randomnessSmooth, this.params.randomness, 4.4, dt);
+
+        const onset = clamp01((this.energySmooth - this.energySmoothPrev) * 9.0);
+        this.energySmoothPrev = this.energySmooth;
 
         const randomRate = lerp(0.12, 1.45, this.params.randomness);
         const randDepth = lerp(0.02, 0.28, this.params.randomness);
@@ -1098,12 +1261,22 @@ class ParticleVisualizer
         const baseRadius = Math.min(w, h) * 0.30;
         const amp = (7 + this.stableIntensity * 40 + this.energySmooth * 24);
 
+        this.spawnCooldown = Math.max(0, this.spawnCooldown - dt);
+        if (onset &gt; 0.08 &amp;&amp; this.spawnCooldown &lt;= 0)
+        {
+            this.spawnParticles(onset, shapeId, cx, cy, baseRadius);
+            this.spawnCooldown = lerp(0.03, 0.065, this.randomnessSmooth * 0.55);
+        }
+        this.updateParticles(dt, w, h);
+
         ctx.clearRect(0, 0, w, h);
         const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, w * 0.65);
         bg.addColorStop(0, &quot;rgba(18,24,34,0.86)&quot;);
         bg.addColorStop(1, &quot;rgba(5,8,12,0.98)&quot;);
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, w, h);
+
+        this.drawParticles(ctx, shapeId);
 
         const contourPulse = 1 + Math.sin(this.colorPhase * 0.92) * (0.02 + this.stableIntensity * 0.08);
 
