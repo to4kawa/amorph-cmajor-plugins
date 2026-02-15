@@ -891,6 +891,7 @@ class ParticleVisualizer
         }));
         this.particleHead = 0;
         this.spawnCooldown = 0;
+        this.continuousSpawnAccum = 0;
         this.randomnessSmooth = this.params.randomness;
 
         this.paletteSets = [
@@ -1094,6 +1095,7 @@ class ParticleVisualizer
     spawnParticles (onset, shapeId, cx, cy, baseRadius, w, h)
     {
         const jitter = this.randomnessSmooth;
+        const intensityBoost = clamp01(this.stableIntensity * 0.72 + this.energySmooth * 0.28);
         const count = 1 + Math.round(onset * (4 + this.stableIntensity * 12));
         const speedMin = 38;
         const speedMax = 310;
@@ -1299,6 +1301,20 @@ class ParticleVisualizer
         const cy = h * 0.5;
         const baseRadius = Math.min(w, h) * 0.30;
         const amp = (7 + this.stableIntensity * 40 + this.energySmooth * 24);
+
+        const emitterDrive = clamp01(this.params.intensity * 0.62 + this.energySmooth * 0.38);
+        const emitterInterval = lerp(0.32, 0.045, emitterDrive);
+        const continuousOnset = clamp01(0.05 + emitterDrive * 0.22);
+        this.continuousSpawnAccum += dt;
+        let safety = 0;
+        while (this.continuousSpawnAccum &gt;= emitterInterval &amp;&amp; safety &lt; 6)
+        {
+            this.spawnParticles(continuousOnset, shapeId, cx, cy, baseRadius, w, h);
+            this.continuousSpawnAccum -= emitterInterval;
+            safety++;
+        }
+        if (this.continuousSpawnAccum &gt; emitterInterval)
+            this.continuousSpawnAccum = emitterInterval;
 
         this.spawnCooldown = Math.max(0, this.spawnCooldown - dt);
         if (onset &gt; 0.08 &amp;&amp; this.spawnCooldown &lt;= 0)
