@@ -1094,12 +1094,11 @@ class ParticleVisualizer
     spawnParticles (onset, shapeId, cx, cy, baseRadius, w, h)
     {
         const jitter = this.randomnessSmooth;
-        const intensityBoost = clamp01(this.stableIntensity);
-        const count = 1 + Math.round(onset * lerp(4, 24, intensityBoost));
-        const speedMin = lerp(150, 260, intensityBoost);
-        const speedMax = lerp(560, 1280, intensityBoost);
-        const lifeBase = lerp(0.42, 1.65, intensityBoost);
-        const spread = lerp(0.42, 1.0, jitter);
+        const count = 1 + Math.round(onset * (4 + this.stableIntensity * 12));
+        const speedMin = 38;
+        const speedMax = 310;
+        const lifeBase = lerp(0.35, 1.2, 0.2 + this.stableIntensity * 0.8);
+        const spread = lerp(0.65, 1.0, jitter);
         const tangentialMix = shapeId === 3 ? (0.04 + jitter * 0.12) : 0;
         const screenRadius = Math.sqrt((w * 0.5) * (w * 0.5) + (h * 0.5) * (h * 0.5));
         const maxRadiusBase = lerp(screenRadius * 0.45, screenRadius, intensityBoost);
@@ -1111,7 +1110,8 @@ class ParticleVisualizer
 
             const thetaBase = Math.random() * Math.PI * 2;
             const theta = thetaBase + (Math.random() - 0.5) * (1.0 - spread) * Math.PI;
-            const speed = lerp(speedMin, speedMax, this.stableIntensity) * lerp(0.6, 1.4, Math.random());
+            const intensityCurve = Math.pow(clamp01(this.stableIntensity), 1.7);
+            const speed = lerp(speedMin, speedMax, intensityCurve) * lerp(0.75, 1.2, Math.random());
             const dirX = Math.cos(theta);
             const dirY = Math.sin(theta);
             const tanX = -dirY;
@@ -1285,9 +1285,15 @@ class ParticleVisualizer
 
         const shapeId = Math.max(0, Math.min(3, Math.round(this.stableShape * 3)));
 
-        this.colorPhase += dt * (0.7 + this.stableIntensity * 1.5 + this.params.randomness * 0.5);
-        this.shapePhase += dt * (0.4 + this.params.randomness * 1.2);
-        this.rot += dt * (0.15 + this.stableIntensity * 0.75 + this.energySmooth * 0.25);
+        const phaseDrive = clamp01(this.stableIntensity * 0.7 + this.params.randomness * 0.3);
+        const phaseCurve = Math.pow(phaseDrive, 1.85);
+        const randomCurve = Math.pow(clamp01(this.params.randomness), 1.6);
+        const rotDrive = clamp01(this.stableIntensity * 0.65 + this.params.randomness * 0.2 + this.energySmooth * 0.15);
+        const rotCurve = Math.pow(rotDrive, 1.7);
+
+        this.colorPhase += dt * lerp(0.22, 1.35, phaseCurve);
+        this.shapePhase += dt * lerp(0.12, 0.8, randomCurve);
+        this.rot += dt * lerp(0.05, 0.58, rotCurve);
 
         const cx = w * 0.5;
         const cy = h * 0.5;
