@@ -1,0 +1,399 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="Amorph RingBuffer Granular OLA WSOLA (FX)" date="2026-02-18T00:00:00.000+09:00">
+  <PresentationConfig title="Amorph RingBuffer Granular OLA WSOLA (FX)" author="Codex" paramCount="12"
+                      highlightColour="ff6f5cff" backgroundColour="ff141414" autoGenerateUiCode="1"
+                      uiScale="1.0" labWidth="980" labHeight="700" presentationWidth="980"
+                      presentationHeight="700">
+    <ParameterNames>
+      <Param index="0" name="Mode"/>
+      <Param index="1" name="Wet"/>
+      <Param index="2" name="BufferMs"/>
+      <Param index="3" name="GrainLenMs"/>
+      <Param index="4" name="Speed"/>
+      <Param index="5" name="JitterMs"/>
+      <Param index="6" name="Freeze"/>
+      <Param index="7" name="Stretch"/>
+      <Param index="8" name="WinMs"/>
+      <Param index="9" name="SearchMs"/>
+      <Param index="10" name="TransientLock"/>
+      <Param index="11" name="LP Damp"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code><![CDATA[
+processor AmorphRingBufferFx
+{
+    input stream float<2> in;
+    output stream float<2> out;
+
+    input event float param1 [[ name: "Mode",           min: 0.0, max: 2.0, init: 0.0, step: 1.0 ]];
+    input event float param2 [[ name: "Wet",            min: 0.0, max: 1.0, init: 0.55, step: 0.01 ]];
+    input event float param3 [[ name: "BufferMs",       min: 30.0, max: 200.0, init: 100.0, step: 1.0, unit: "ms" ]];
+    input event float param4 [[ name: "GrainLenMs",     min: 10.0, max: 40.0, init: 24.0, step: 0.1, unit: "ms" ]];
+    input event float param5 [[ name: "Speed",          min: 0.5, max: 2.0, init: 1.0, step: 0.01 ]];
+    input event float param6 [[ name: "JitterMs",       min: 0.0, max: 10.0, init: 1.5, step: 0.1, unit: "ms" ]];
+    input event float param7 [[ name: "Freeze",         min: 0.0, max: 1.0, init: 0.0, step: 1.0 ]];
+    input event float param8 [[ name: "Stretch",        min: 0.5, max: 2.0, init: 1.0, step: 0.01 ]];
+    input event float param9 [[ name: "WinMs",          min: 20.0, max: 40.0, init: 28.0, step: 0.1, unit: "ms" ]];
+    input event float param10 [[ name: "SearchMs",      min: 0.0, max: 10.0, init: 4.0, step: 0.1, unit: "ms" ]];
+    input event float param11 [[ name: "TransientLock", min: 0.0, max: 1.0, init: 0.0, step: 1.0 ]];
+    input event float param12 [[ name: "LP Damp",       min: 0.0, max: 1.0, init: 0.25, step: 0.01 ]];
+
+    float modeSel = 0.0f;
+    float wetMix = 0.55f;
+    float bufferMs = 100.0f;
+    float grainLenMs = 24.0f;
+    float speed = 1.0f;
+    float jitterMs = 1.5f;
+    float freezeState = 0.0f;
+    float stretch = 1.0f;
+    float winMs = 28.0f;
+    float searchMs = 4.0f;
+    float transientLock = 0.0f;
+    float damp = 0.25f;
+
+    event param1  (float v) { modeSel = clamp(v, 0.0f, 2.0f); }
+    event param2  (float v) { wetMix = clamp(v, 0.0f, 1.0f); }
+    event param3  (float v) { bufferMs = clamp(v, 30.0f, 200.0f); }
+    event param4  (float v) { grainLenMs = clamp(v, 10.0f, 40.0f); }
+    event param5  (float v) { speed = clamp(v, 0.5f, 2.0f); }
+    event param6  (float v) { jitterMs = clamp(v, 0.0f, 10.0f); }
+    event param7  (float v) { freezeState = clamp(v, 0.0f, 1.0f); }
+    event param8  (float v) { stretch = clamp(v, 0.5f, 2.0f); }
+    event param9  (float v) { winMs = clamp(v, 20.0f, 40.0f); }
+    event param10 (float v) { searchMs = clamp(v, 0.0f, 10.0f); }
+    event param11 (float v) { transientLock = clamp(v, 0.0f, 1.0f); }
+    event param12 (float v) { damp = clamp(v, 0.0f, 1.0f); }
+
+    const int maxRing = 9600;
+    const int maxWindow = 2048;
+
+    float[maxRing] ringL;
+    float[maxRing] ringR;
+    int wr = 0;
+    int ringLen = 4800;
+
+    float[maxWindow] hann;
+
+    struct Grain
+    {
+        float pos;
+        int age;
+        int len;
+        float rate;
+        float gain;
+        bool on;
+    }
+
+    Grain[2] grains;
+    int grainTurn = 0;
+    int grainCountdown = 0;
+
+    float olaReadPos = 0.0f;
+    float olaSynthesisCounter = 0.0f;
+    float[maxWindow] olaSegL;
+    float[maxWindow] olaSegR;
+    int olaSegLen = 0;
+    int olaSegIndex = 0;
+
+    float[maxWindow] overlapL;
+    float[maxWindow] overlapR;
+    float[maxWindow] overlapNorm;
+
+    int randState = 22222;
+
+    float lpStateL = 0.0f;
+    float lpStateR = 0.0f;
+
+    float nextRand()
+    {
+        randState = randState * 1103515245 + 12345;
+        int r = (randState / 65536) & 32767;
+        return float(r) / 32767.0f;
+    }
+
+    float wrapPos(float p, int n)
+    {
+        if (n <= 0)
+            return 0.0f;
+
+        float nF = float(n);
+        float outPos = p;
+
+        while (outPos < 0.0f)
+            outPos += nF;
+        while (outPos >= nF)
+            outPos -= nF;
+
+        return outPos;
+    }
+
+    int wrapIndex(int i, int n)
+    {
+        int idx = i;
+        while (idx < 0)
+            idx += n;
+        while (idx >= n)
+            idx -= n;
+        return idx;
+    }
+
+    float interpRing(float[] src, float p, int n)
+    {
+        float wp = wrapPos(p, n);
+        int i0 = int(wp);
+        int i1 = wrapIndex(i0 + 1, n);
+        float t = wp - float(i0);
+        return src.at(i0) + (src.at(i1) - src.at(i0)) * t;
+    }
+
+    void refreshHann(int len)
+    {
+        int n = clamp(len, 2, maxWindow);
+
+        for (int i = 0; i < n; ++i)
+        {
+            float x = float(i) / float(n - 1);
+            hann[i] = 0.5f - 0.5f * float(cos(float64(twoPi) * float64(x)));
+        }
+    }
+
+    void triggerGrain(float sr)
+    {
+        int gLen = clamp(int(grainLenMs * 0.001f * sr), 16, maxWindow);
+        float baseDelay = clamp(grainLenMs * 0.001f * sr * 0.5f, 16.0f, float(ringLen - 4));
+        float jitter = (nextRand() * 2.0f - 1.0f) * jitterMs * 0.001f * sr;
+        float startPos = float(wr) - baseDelay + jitter;
+
+        Grain g;
+        g.pos = wrapPos(startPos, ringLen);
+        g.age = 0;
+        g.len = gLen;
+        g.rate = speed;
+        g.gain = 1.0f;
+        g.on = true;
+
+        grains[grainTurn] = g;
+        grainTurn = 1 - grainTurn;
+
+        int hop = clamp(gLen / 2, 1, maxWindow - 1);
+        grainCountdown = hop;
+    }
+
+    float<2> processGranular(float sr)
+    {
+        if (grainCountdown <= 0)
+            triggerGrain(sr);
+
+        float accL = 0.0f;
+        float accR = 0.0f;
+        float norm = 0.0f;
+
+        for (int i = 0; i < 2; ++i)
+        {
+            if (!grains[i].on)
+                continue;
+
+            Grain g = grains[i];
+
+            if (g.age >= g.len)
+            {
+                g.on = false;
+                grains[i] = g;
+                continue;
+            }
+
+            int wi = clamp(g.age, 0, g.len - 1);
+            float w = hann.at(wi);
+            float sL = interpRing(ringL, g.pos, ringLen);
+            float sR = interpRing(ringR, g.pos, ringLen);
+
+            accL += sL * w * g.gain;
+            accR += sR * w * g.gain;
+            norm += w;
+
+            g.pos = wrapPos(g.pos + g.rate, ringLen);
+            g.age += 1;
+            grains[i] = g;
+        }
+
+        grainCountdown -= 1;
+
+        float n = max(norm, 0.001f);
+        return float<2>(accL / n, accR / n);
+    }
+
+    void fetchSegment(float[] src, float pos, int n, int len, float[] dst)
+    {
+        for (int i = 0; i < len; ++i)
+            dst[i] = interpRing(src, pos + float(i), n);
+    }
+
+    float scoreWindow(float[] a, float[] b, int len)
+    {
+        float s = 0.0f;
+        float ea = 0.0f;
+        float eb = 0.0f;
+
+        for (int i = 0; i < len; i += 2)
+        {
+            float av = a.at(i);
+            float bv = b.at(i);
+            s += av * bv;
+            ea += av * av;
+            eb += bv * bv;
+        }
+
+        return s / (float(sqrt(max(ea * eb, 1.0e-9f))) + 1.0e-6f);
+    }
+
+    float chooseWsolaPos(float candidate, float sr, int len)
+    {
+        int search = int(searchMs * 0.001f * sr);
+        if (transientLock > 0.5f)
+            search = min(search, int(0.002f * sr));
+
+        if (search <= 0)
+            return candidate;
+
+        float bestPos = candidate;
+        float bestScore = -1000.0f;
+
+        for (int off = -search; off <= search; off += 2)
+        {
+            float pos = candidate + float(off);
+            fetchSegment(ringL, pos, ringLen, len / 2, olaSegL);
+            float sc = scoreWindow(olaSegL, overlapL, len / 2);
+            if (sc > bestScore)
+            {
+                bestScore = sc;
+                bestPos = pos;
+            }
+        }
+
+        if (bestScore < 0.1f)
+            return candidate;
+
+        return bestPos;
+    }
+
+    float<2> processOlaLike(float sr, bool useSearch)
+    {
+        int w = clamp(int(winMs * 0.001f * sr), 64, maxWindow);
+        int ha = max(w / 2, 1);
+        int hs = clamp(int(float(ha) * stretch), 1, maxWindow - 1);
+
+        olaSynthesisCounter += 1.0f;
+
+        if (olaSynthesisCounter >= float(hs) || olaSegLen != w)
+        {
+            olaSynthesisCounter = 0.0f;
+            olaSegLen = w;
+            olaSegIndex = 0;
+
+            float pickPos = olaReadPos;
+            if (useSearch)
+                pickPos = chooseWsolaPos(olaReadPos, sr, w);
+
+            fetchSegment(ringL, pickPos, ringLen, w, olaSegL);
+            fetchSegment(ringR, pickPos, ringLen, w, olaSegR);
+
+            for (int i = 0; i < w; ++i)
+            {
+                float win = hann.at(i);
+                overlapL[i] += olaSegL[i] * win;
+                overlapR[i] += olaSegR[i] * win;
+                overlapNorm[i] += win;
+            }
+
+            for (int i = 0; i < w / 2; ++i)
+                overlapL[i] = olaSegL[i];
+
+            olaReadPos = wrapPos(pickPos + float(ha), ringLen);
+        }
+
+        float wetL = overlapL[0] / max(overlapNorm[0], 0.001f);
+        float wetR = overlapR[0] / max(overlapNorm[0], 0.001f);
+
+        for (int i = 0; i < maxWindow - 1; ++i)
+        {
+            overlapL[i] = overlapL[i + 1];
+            overlapR[i] = overlapR[i + 1];
+            overlapNorm[i] = overlapNorm[i + 1];
+        }
+
+        overlapL[maxWindow - 1] = 0.0f;
+        overlapR[maxWindow - 1] = 0.0f;
+        overlapNorm[maxWindow - 1] = 0.0f;
+
+        return float<2>(wetL, wetR);
+    }
+
+    void main()
+    {
+        refreshHann(1024);
+
+        for (int i = 0; i < 2; ++i)
+        {
+            grains[i].on = false;
+            grains[i].pos = 0.0f;
+            grains[i].age = 0;
+            grains[i].len = 256;
+            grains[i].rate = 1.0f;
+            grains[i].gain = 1.0f;
+        }
+
+        loop
+        {
+            float sr = 1.0f / float(processor.period);
+            ringLen = clamp(int(bufferMs * 0.001f * sr), 256, maxRing);
+
+            float<2> dry = in;
+
+            if (freezeState < 0.5f)
+            {
+                ringL[wr] = dry[0];
+                ringR[wr] = dry[1];
+                wr += 1;
+                if (wr >= ringLen)
+                    wr = 0;
+            }
+
+            int modeInt = int(modeSel + 0.5f);
+
+            float<2> wet = float<2>(0.0f, 0.0f);
+            if (modeInt == 0)
+            {
+                int gWin = clamp(int(grainLenMs * 0.001f * sr), 16, maxWindow);
+                refreshHann(gWin);
+                wet = processGranular(sr);
+            }
+            else if (modeInt == 1)
+            {
+                int oWin = clamp(int(winMs * 0.001f * sr), 64, maxWindow);
+                refreshHann(oWin);
+                wet = processOlaLike(sr, false);
+            }
+            else
+            {
+                int wWin = clamp(int(winMs * 0.001f * sr), 64, maxWindow);
+                refreshHann(wWin);
+                wet = processOlaLike(sr, true);
+            }
+
+            float dampCoef = 0.05f + damp * 0.9f;
+            lpStateL = lpStateL + dampCoef * (wet[0] - lpStateL);
+            lpStateR = lpStateR + dampCoef * (wet[1] - lpStateR);
+
+            float wetGain = wetMix;
+            float dryGain = 1.0f - wetMix;
+            float outL = dry[0] * dryGain + lpStateL * wetGain;
+            float outR = dry[1] * dryGain + lpStateR * wetGain;
+
+            out <- float<2>(outL, outR);
+            advance();
+        }
+    }
+}
+]]></Code>
+</AmorphAlgorithm>
