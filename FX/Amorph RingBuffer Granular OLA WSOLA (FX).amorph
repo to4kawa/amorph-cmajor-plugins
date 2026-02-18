@@ -99,11 +99,23 @@ processor AmorphRingBufferFx
     float[maxWindow] overlapL;
     float[maxWindow] overlapR;
     float[maxWindow] overlapNorm;
+    float[maxWindow] refL;
+    int refLen = 0;
 
     int randState = 22222;
 
     float lpStateL = 0.0f;
     float lpStateR = 0.0f;
+
+    float clamp(float x, float lo, float hi)
+    {
+        return x < lo ? lo : (x > hi ? hi : x);
+    }
+
+    int clamp(int x, int lo, int hi)
+    {
+        return x < lo ? lo : (x > hi ? hi : x);
+    }
 
     float nextRand()
     {
@@ -253,7 +265,7 @@ processor AmorphRingBufferFx
         if (transientLock > 0.5f)
             search = min(search, int(0.002f * sr));
 
-        if (search <= 0)
+        if (search <= 0 || refLen <= 0)
             return candidate;
 
         float bestPos = candidate;
@@ -263,7 +275,7 @@ processor AmorphRingBufferFx
         {
             float pos = candidate + float(off);
             fetchSegment(ringL, pos, ringLen, len / 2, olaSegL);
-            float sc = scoreWindow(olaSegL, overlapL, len / 2);
+            float sc = scoreWindow(olaSegL, refL, len / 2);
             if (sc > bestScore)
             {
                 bestScore = sc;
@@ -298,6 +310,10 @@ processor AmorphRingBufferFx
             fetchSegment(ringL, pickPos, ringLen, w, olaSegL);
             fetchSegment(ringR, pickPos, ringLen, w, olaSegR);
 
+            refLen = w / 2;
+            for (int i = 0; i < refLen; ++i)
+                refL[i] = olaSegL[i];
+
             for (int i = 0; i < w; ++i)
             {
                 float win = hann.at(i);
@@ -306,8 +322,6 @@ processor AmorphRingBufferFx
                 overlapNorm[i] += win;
             }
 
-            for (int i = 0; i < w / 2; ++i)
-                overlapL[i] = olaSegL[i];
 
             olaReadPos = wrapPos(pickPos + float(ha), ringLen);
         }
@@ -315,16 +329,17 @@ processor AmorphRingBufferFx
         float wetL = overlapL[0] / max(overlapNorm[0], 0.001f);
         float wetR = overlapR[0] / max(overlapNorm[0], 0.001f);
 
-        for (int i = 0; i < maxWindow - 1; ++i)
+        int n = max(olaSegLen, 1);
+        for (int i = 0; i < n - 1; ++i)
         {
             overlapL[i] = overlapL[i + 1];
             overlapR[i] = overlapR[i + 1];
             overlapNorm[i] = overlapNorm[i + 1];
         }
 
-        overlapL[maxWindow - 1] = 0.0f;
-        overlapR[maxWindow - 1] = 0.0f;
-        overlapNorm[maxWindow - 1] = 0.0f;
+        overlapL[n - 1] = 0.0f;
+        overlapR[n - 1] = 0.0f;
+        overlapNorm[n - 1] = 0.0f;
 
         return float<2>(wetL, wetR);
     }
@@ -332,6 +347,8 @@ processor AmorphRingBufferFx
     void main()
     {
         refreshHann(1024);
+
+        refLen = 0;
 
         for (int i = 0; i < 2; ++i)
         {
@@ -347,6 +364,7 @@ processor AmorphRingBufferFx
         {
             float sr = 1.0f / float(processor.period);
             ringLen = clamp(int(bufferMs * 0.001f * sr), 256, maxRing);
+            wr = wrapIndex(wr, ringLen);
 
             float<2> dry = in;
 
