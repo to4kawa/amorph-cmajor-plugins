@@ -1,0 +1,284 @@
+processor MSPhaseSTFTPrototype
+{
+    input  stream float<2> in;
+    output stream float<2> out;
+
+    input event float param1 [[ name: "Depth",           min: 0.0,  max: 1.0,    init: 0.45, step: 0.01 ]];
+    input event float param2 [[ name: "Base Freq",       min: 40.0, max: 500.0,  init: 140.0, step: 1.0  ]];
+    input event float param3 [[ name: "Max Freq",        min: 2000.0, max: 20000.0, init: 18000.0, step: 10.0 ]];
+    input event float param4 [[ name: "Curve",           min: 0.5,  max: 5.0,    init: 2.0,  step: 0.01 ]];
+    input event float param5 [[ name: "Phase Slew",      min: 0.02, max: 0.8,    init: 0.3926991, step: 0.001 ]];
+    input event float param6 [[ name: "Transient Guard", min: 0.0,  max: 1.0,    init: 0.75, step: 0.01 ]];
+    input event float param7 [[ name: "LFO Hz",          min: 0.0,  max: 2.0,    init: 0.25, step: 0.01 ]];
+    input event float param8 [[ name: "Wet",             min: 0.0,  max: 1.0,    init: 1.0,  step: 0.01 ]];
+
+    float depth = 0.45f;
+    float baseFreq = 140.0f;
+    float maxFreq = 18000.0f;
+    float curve = 2.0f;
+    float phaseSlewLimit = 0.3926991f; // pi/8 per frame
+    float transientGuard = 0.75f;
+    float lfoHz = 0.25f;
+    float wet = 1.0f;
+
+    event param1 (float v) { depth = clamp (v, 0.0f, 1.0f); }
+    event param2 (float v) { baseFreq = max (40.0f, v); }
+    event param3 (float v) { maxFreq = max (baseFreq + 100.0f, v); }
+    event param4 (float v) { curve = clamp (v, 0.5f, 5.0f); }
+    event param5 (float v) { phaseSlewLimit = clamp (v, 0.02f, 0.8f); }
+    event param6 (float v) { transientGuard = clamp (v, 0.0f, 1.0f); }
+    event param7 (float v) { lfoHz = clamp (v, 0.0f, 2.0f); }
+    event param8 (float v) { wet = clamp (v, 0.0f, 1.0f); }
+
+    const int N = 4096;
+    const int hop = 1024; // 75% overlap
+    const int ringSize = N * 4;
+    const int latency = N;
+
+    float[ringSize] inMidRing;
+    float[ringSize] inSideRing;
+    float[ringSize] outMidAccum;
+    float[ringSize] outSideAccum;
+    float[ringSize] normAccum;
+
+    float[N] window;
+    float[N] frameMid;
+    float[N] frameSide;
+    float[N] reMid;
+    float[N] imMid;
+    float[N] reSide;
+    float[N] imSide;
+    float[N] tmpMid;
+    float[N] tmpSide;
+
+    float[(N / 2) + 1] sidePhaseOffsetPrev;
+
+    int samplePos = 0;
+    int hopCounter = 0;
+    float prevFrameEnergy = 1.0e-6f;
+    float lfoPhase = 0.0f;
+
+    int wrapIndex (int i)
+    {
+        int x = i;
+        while (x < 0) x += ringSize;
+        while (x >= ringSize) x -= ringSize;
+        return x;
+    }
+
+    float clampf (float x, float lo, float hi)
+    {
+        return x < lo ? lo : (x > hi ? hi : x);
+    }
+
+    float computeFreqWeight01 (int k, float sr)
+    {
+        float binFreq = float (k) * sr / float (N);
+        float safeFreq = max (binFreq, baseFreq);
+        float numer = float (log2 (float64 (safeFreq / baseFreq)));
+        float denom = float (log2 (float64 (maxFreq / baseFreq)));
+        float norm = denom > 1.0e-6f ? numer / denom : 0.0f;
+        return clampf (norm, 0.0f, 1.0f);
+    }
+
+    void clearAll()
+    {
+        for (int i = 0; i < ringSize; ++i)
+        {
+            inMidRing[i] = 0.0f;
+            inSideRing[i] = 0.0f;
+            outMidAccum[i] = 0.0f;
+            outSideAccum[i] = 0.0f;
+            normAccum[i] = 0.0f;
+        }
+
+        for (int i = 0; i < N; ++i)
+        {
+            float ph = float (twoPi) * float (i) / float (N - 1);
+            window[i] = 0.5f - 0.5f * float (cos (float64 (ph)));
+            frameMid[i] = 0.0f;
+            frameSide[i] = 0.0f;
+            reMid[i] = 0.0f;
+            imMid[i] = 0.0f;
+            reSide[i] = 0.0f;
+            imSide[i] = 0.0f;
+            tmpMid[i] = 0.0f;
+            tmpSide[i] = 0.0f;
+        }
+
+        for (int k = 0; k <= (N / 2); ++k)
+            sidePhaseOffsetPrev[k] = 0.0f;
+    }
+
+    void forwardDFT (float[N]& x, float[N]& re, float[N]& im)
+    {
+        for (int k = 0; k < N; ++k)
+        {
+            float sumRe = 0.0f;
+            float sumIm = 0.0f;
+
+            for (int n = 0; n < N; ++n)
+            {
+                float ang = float (twoPi) * float (k * n) / float (N);
+                float c = float (cos (float64 (ang)));
+                float s = float (sin (float64 (ang)));
+                float xn = x[n];
+                sumRe += xn * c;
+                sumIm -= xn * s;
+            }
+
+            re[k] = sumRe;
+            im[k] = sumIm;
+        }
+    }
+
+    void inverseDFT (float[N]& re, float[N]& im, float[N]& x)
+    {
+        float invN = 1.0f / float (N);
+
+        for (int n = 0; n < N; ++n)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < N; ++k)
+            {
+                float ang = float (twoPi) * float (k * n) / float (N);
+                float c = float (cos (float64 (ang)));
+                float s = float (sin (float64 (ang)));
+                sum += re[k] * c - im[k] * s;
+            }
+            x[n] = sum * invN;
+        }
+    }
+
+    void enforceHermitian (float[N]& re, float[N]& im)
+    {
+        im[0] = 0.0f;
+        im[N / 2] = 0.0f;
+
+        for (int k = 1; k < (N / 2); ++k)
+        {
+            int mk = N - k;
+            re[mk] = re[k];
+            im[mk] = -im[k];
+        }
+    }
+
+    void processFrame (float sr)
+    {
+        int frameStart = samplePos - (N - 1);
+
+        float energy = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            int idx = wrapIndex (frameStart + i);
+            float w = window[i];
+
+            float m = inMidRing[idx] * w;
+            float s = inSideRing[idx] * w;
+
+            frameMid[i] = m;
+            frameSide[i] = s;
+            energy += m * m + s * s;
+        }
+
+        float transientStrength = clampf ((energy - prevFrameEnergy) / (prevFrameEnergy + 1.0e-7f), 0.0f, 1.0f);
+        prevFrameEnergy = energy;
+
+        forwardDFT (frameMid, reMid, imMid);
+        forwardDFT (frameSide, reSide, imSide);
+
+        float framesPerSecond = sr / float (hop);
+        lfoPhase += lfoHz / max (framesPerSecond, 1.0f);
+        while (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+
+        float transientScale = 1.0f - transientGuard * transientStrength;
+        transientScale = clampf (transientScale, 0.0f, 1.0f);
+
+        for (int k = 0; k <= (N / 2); ++k)
+        {
+            float w01 = computeFreqWeight01 (k, sr);
+            float shaped = float (pow (float64 (w01), float64 (curve)));
+            float signedLfo = float (sin (float64 ((float (twoPi) * lfoPhase) + (0.0015f * float (k)))));
+
+            float desiredOffset = depth * shaped * transientScale * signedLfo;
+            float delta = desiredOffset - sidePhaseOffsetPrev[k];
+            delta = clampf (delta, -phaseSlewLimit, phaseSlewLimit);
+            float offset = sidePhaseOffsetPrev[k] + delta;
+            sidePhaseOffsetPrev[k] = offset;
+
+            float c = float (cos (float64 (offset)));
+            float s = float (sin (float64 (offset)));
+
+            float oldRe = reSide[k];
+            float oldIm = imSide[k];
+
+            reSide[k] = oldRe * c - oldIm * s;
+            imSide[k] = oldRe * s + oldIm * c;
+        }
+
+        enforceHermitian (reMid, imMid);
+        enforceHermitian (reSide, imSide);
+
+        inverseDFT (reMid, imMid, tmpMid);
+        inverseDFT (reSide, imSide, tmpSide);
+
+        for (int i = 0; i < N; ++i)
+        {
+            float w = window[i];
+            float ww = w * w;
+            int dst = wrapIndex (frameStart + i + latency);
+
+            outMidAccum[dst] += tmpMid[i] * w;
+            outSideAccum[dst] += tmpSide[i] * w;
+            normAccum[dst] += ww;
+        }
+    }
+
+    void main()
+    {
+        clearAll();
+
+        loop
+        {
+            float<2> x = in;
+
+            float dryL = x[0];
+            float dryR = x[1];
+
+            float mid = 0.5f * (dryL + dryR);
+            float side = 0.5f * (dryL - dryR);
+
+            inMidRing[samplePos] = mid;
+            inSideRing[samplePos] = side;
+
+            float n = max (normAccum[samplePos], 1.0e-5f);
+            float wetMid = outMidAccum[samplePos] / n;
+            float wetSide = outSideAccum[samplePos] / n;
+
+            outMidAccum[samplePos] = 0.0f;
+            outSideAccum[samplePos] = 0.0f;
+            normAccum[samplePos] = 0.0f;
+
+            float wetL = wetMid + wetSide;
+            float wetR = wetMid - wetSide;
+
+            float outL = dryL * (1.0f - wet) + wetL * wet;
+            float outR = dryR * (1.0f - wet) + wetR * wet;
+
+            out <- float<2> (outL, outR);
+
+            hopCounter += 1;
+            if (hopCounter >= hop)
+            {
+                processFrame (float (processor.frequency));
+                hopCounter = 0;
+            }
+
+            samplePos += 1;
+            if (samplePos >= ringSize)
+                samplePos = 0;
+
+            advance();
+        }
+    }
+}
