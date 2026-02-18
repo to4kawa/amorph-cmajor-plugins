@@ -1,0 +1,365 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="Amorph_Pro5" date="2026-02-17T00:00:00.000+00:00">
+  <PresentationConfig title="Amorph Pro-5" paramCount="18" highlightColour="ffcf9f53"
+                      backgroundColour="ff171717" autoGenerateUiCode="1" uiScale="1.0"
+                      labWidth="980" labHeight="720" presentationWidth="920" presentationHeight="760">
+    <ParameterNames>
+      <Param index="0" name="OSC Mix"/>
+      <Param index="1" name="OSC2 Detune"/>
+      <Param index="2" name="Shape"/>
+      <Param index="3" name="Drift"/>
+      <Param index="4" name="Cutoff"/>
+      <Param index="5" name="Resonance"/>
+      <Param index="6" name="Env Amt"/>
+      <Param index="7" name="Key Track"/>
+      <Param index="8" name="Drive"/>
+      <Param index="9" name="F Attack"/>
+      <Param index="10" name="F Decay"/>
+      <Param index="11" name="F SR"/>
+      <Param index="12" name="A Attack"/>
+      <Param index="13" name="A Decay"/>
+      <Param index="14" name="A SR"/>
+      <Param index="15" name="LFO Rate"/>
+      <Param index="16" name="LFO Amt"/>
+      <Param index="17" name="Vintage"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>processor AmorphPro5
+{
+    output stream float&lt;2&gt; out;
+    input event std::midi::Message midiIn;
+
+    input event float param1  [[ name: &quot;OSC Mix&quot;,     min: 0.0,   max: 1.0,      init: 0.5 ]];
+    input event float param2  [[ name: &quot;OSC2 Detune&quot;, min: -30.0, max: 30.0,     init: 6.0, unit: &quot;ct&quot; ]];
+    input event float param3  [[ name: &quot;Shape&quot;,       min: 0.0,   max: 1.0,      init: 0.32 ]];
+    input event float param4  [[ name: &quot;Drift&quot;,       min: 0.0,   max: 1.0,      init: 0.2 ]];
+    input event float param5  [[ name: &quot;Cutoff&quot;,      min: 20.0,  max: 18000.0,  init: 1900.0, unit: &quot;Hz&quot; ]];
+    input event float param6  [[ name: &quot;Resonance&quot;,   min: 0.0,   max: 1.0,      init: 0.2 ]];
+    input event float param7  [[ name: &quot;Env Amt&quot;,     min: -1.0,  max: 1.0,      init: 0.52 ]];
+    input event float param8  [[ name: &quot;Key Track&quot;,   min: 0.0,   max: 1.0,      init: 0.35 ]];
+    input event float param9  [[ name: &quot;Drive&quot;,       min: 0.0,   max: 1.0,      init: 0.18 ]];
+    input event float param10 [[ name: &quot;F Attack&quot;,    min: 0.001, max: 2.0,      init: 0.015, unit: &quot;s&quot; ]];
+    input event float param11 [[ name: &quot;F Decay&quot;,     min: 0.01,  max: 5.0,      init: 0.32, unit: &quot;s&quot; ]];
+    input event float param12 [[ name: &quot;F SR&quot;,        min: 0.0,   max: 1.0,      init: 0.54 ]];
+    input event float param13 [[ name: &quot;A Attack&quot;,    min: 0.001, max: 2.0,      init: 0.01, unit: &quot;s&quot; ]];
+    input event float param14 [[ name: &quot;A Decay&quot;,     min: 0.01,  max: 5.0,      init: 0.48, unit: &quot;s&quot; ]];
+    input event float param15 [[ name: &quot;A SR&quot;,        min: 0.0,   max: 1.0,      init: 0.6 ]];
+    input event float param16 [[ name: &quot;LFO Rate&quot;,    min: 0.05,  max: 12.0,     init: 1.2, unit: &quot;Hz&quot; ]];
+    input event float param17 [[ name: &quot;LFO Amt&quot;,     min: 0.0,   max: 1.0,      init: 0.14 ]];
+    input event float param18 [[ name: &quot;Vintage&quot;,     min: 0.0,   max: 1.0,      init: 0.28 ]];
+
+    float oscMixTarget = 0.5f;       float oscMixSm = 0.5f;
+    float detuneTarget = 6.0f;       float detuneSm = 6.0f;
+    float shapeTarget = 0.32f;       float shapeSm = 0.32f;
+    float driftTarget = 0.2f;        float driftSm = 0.2f;
+    float cutoffTarget = 1900.0f;    float cutoffSm = 1900.0f;
+    float resTarget = 0.2f;          float resSm = 0.2f;
+    float envAmtTarget = 0.52f;      float envAmtSm = 0.52f;
+    float keyTrackTarget = 0.35f;    float keyTrackSm = 0.35f;
+    float driveTarget = 0.18f;       float driveSm = 0.18f;
+    float fAtkTarget = 0.015f;       float fAtkSm = 0.015f;
+    float fDecTarget = 0.32f;        float fDecSm = 0.32f;
+    float fSRTarget = 0.54f;         float fSRSm = 0.54f;
+    float aAtkTarget = 0.01f;        float aAtkSm = 0.01f;
+    float aDecTarget = 0.48f;        float aDecSm = 0.48f;
+    float aSRTarget = 0.6f;          float aSRSm = 0.6f;
+    float lfoRateTarget = 1.2f;      float lfoRateSm = 1.2f;
+    float lfoAmtTarget = 0.14f;      float lfoAmtSm = 0.14f;
+    float vintageTarget = 0.28f;     float vintageSm = 0.28f;
+
+    event param1 (float v)  { oscMixTarget = v; }
+    event param2 (float v)  { detuneTarget = v; }
+    event param3 (float v)  { shapeTarget = v; }
+    event param4 (float v)  { driftTarget = v; }
+    event param5 (float v)  { cutoffTarget = v; }
+    event param6 (float v)  { resTarget = v; }
+    event param7 (float v)  { envAmtTarget = v; }
+    event param8 (float v)  { keyTrackTarget = v; }
+    event param9 (float v)  { driveTarget = v; }
+    event param10 (float v) { fAtkTarget = v; }
+    event param11 (float v) { fDecTarget = v; }
+    event param12 (float v) { fSRTarget = v; }
+    event param13 (float v) { aAtkTarget = v; }
+    event param14 (float v) { aDecTarget = v; }
+    event param15 (float v) { aSRTarget = v; }
+    event param16 (float v) { lfoRateTarget = v; }
+    event param17 (float v) { lfoAmtTarget = v; }
+    event param18 (float v) { vintageTarget = v; }
+
+    struct Voice
+    {
+        float frequency;
+        float velocity;
+        float64 phase1;
+        float64 phase2;
+        float ampEnv;
+        float filEnv;
+        int ampStage;
+        int filStage;
+        float driftWalk;
+        float driftVel;
+        float f1;
+        float f2;
+        float f3;
+        float f4;
+        int noteNumber;
+        bool gate;
+        bool active;
+    }
+
+    Voice[8] voices;
+    float64 lfoPhase = 0.0;
+    int noiseState = 13579;
+
+    float clamp (float x, float lo, float hi) { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
+
+    float centRatio (float cents)
+    {
+        return float (pow (float64 (2.0), float64 (cents) / 1200.0));
+    }
+
+    float softSat (float x, float amount)
+    {
+        float a = 1.0f + amount * 2.8f;
+        return float (tanh (float64 (x * a)) / tanh (float64 (a)));
+    }
+
+    float nextNoise()
+    {
+        noiseState = (noiseState * 1103515245 + 12345) &amp; 2147483647;
+        return float (noiseState) * (1.0f / 1073741824.0f) - 1.0f;
+    }
+
+    float morphWave (float64 phase, float shape)
+    {
+        float p = float (phase);
+        float saw = p * 2.0f - 1.0f;
+        float pulseMix = clamp ((shape - 0.5f) * 2.0f, 0.0f, 1.0f);
+        float pw = 0.5f + (shape - 0.5f) * 0.45f;
+        pw = clamp (pw, 0.1f, 0.9f);
+        float pulse = p &lt; pw ? 1.0f : -1.0f;
+        return saw * (1.0f - pulseMix) + pulse * pulseMix;
+    }
+
+    float mapSustain (float srKnob)
+    {
+        return srKnob &lt; 0.5f ? srKnob * 2.0f : 1.0f - (srKnob - 0.5f) * 0.25f;
+    }
+
+    float mapReleaseSeconds (float srKnob)
+    {
+        float x = srKnob &lt; 0.5f ? 0.0f : (srKnob - 0.5f) * 2.0f;
+        return 0.03f + 4.97f * x * x;
+    }
+
+    float envStep (float env, int stage, bool gate, float atk, float dec, float sus, float rel, float dt)
+    {
+        if (stage == 0)
+            return 0.0f;
+
+        float e = env;
+        if (stage == 1)
+        {
+            e += dt / clamp (atk, 0.001f, 8.0f);
+            if (e &gt;= 1.0f)
+            {
+                e = 1.0f;
+            }
+        }
+        else if (stage == 2)
+        {
+            e += (sus - e) * clamp (dt / clamp (dec, 0.001f, 10.0f) * 3.0f, 0.0f, 1.0f);
+        }
+        else if (stage == 3)
+        {
+            e = sus;
+        }
+        else
+        {
+            e *= float (exp (-float64 (dt) / float64 (clamp (rel, 0.001f, 8.0f))));
+            if (e &lt; 0.00002f)
+                e = 0.0f;
+        }
+
+        return clamp (e, 0.0f, 1.0f);
+    }
+
+    int chooseVoice()
+    {
+        for (int i = 0; i &lt; 8; ++i)
+            if (!voices.at(i).active)
+                return i;
+
+        int candidate = 0;
+        float low = voices.at(0).ampEnv;
+        for (int i = 1; i &lt; 8; ++i)
+            if (voices.at(i).ampEnv &lt; low)
+            {
+                low = voices.at(i).ampEnv;
+                candidate = i;
+            }
+
+        return candidate;
+    }
+
+    void setGateStages (int idx, bool on)
+    {
+        voices.at(idx).gate = on;
+        if (on)
+        {
+            voices.at(idx).ampStage = 1;
+            voices.at(idx).filStage = 1;
+        }
+        else
+        {
+            voices.at(idx).ampStage = 4;
+            voices.at(idx).filStage = 4;
+        }
+    }
+
+    event midiIn (std::midi::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            int idx = chooseVoice();
+            voices.at(idx).frequency = std::notes::noteToFrequency (m.getNoteNumber());
+            voices.at(idx).velocity = m.getVelocity() / 127.0f;
+            voices.at(idx).phase1 = 0.0;
+            voices.at(idx).phase2 = 0.0;
+            voices.at(idx).ampEnv = 0.0f;
+            voices.at(idx).filEnv = 0.0f;
+            voices.at(idx).f1 = 0.0f;
+            voices.at(idx).f2 = 0.0f;
+            voices.at(idx).f3 = 0.0f;
+            voices.at(idx).f4 = 0.0f;
+            voices.at(idx).driftWalk = nextNoise() * 0.08f;
+            voices.at(idx).driftVel = 0.0f;
+            voices.at(idx).noteNumber = m.getNoteNumber();
+            voices.at(idx).active = true;
+            setGateStages (idx, true);
+        }
+
+        if (m.isNoteOff())
+        {
+            for (int i = 0; i &lt; 8; ++i)
+                if (voices.at(i).active &amp;&amp; voices.at(i).noteNumber == m.getNoteNumber())
+                    setGateStages (i, false);
+        }
+    }
+
+    void main()
+    {
+        loop
+        {
+            float dt = float (processor.period);
+            float smooth = clamp (dt / 0.025f, 0.0f, 1.0f);
+
+            oscMixSm += (oscMixTarget - oscMixSm) * smooth;
+            detuneSm += (detuneTarget - detuneSm) * smooth;
+            shapeSm += (shapeTarget - shapeSm) * smooth;
+            driftSm += (driftTarget - driftSm) * smooth;
+            cutoffSm += (cutoffTarget - cutoffSm) * smooth;
+            resSm += (resTarget - resSm) * smooth;
+            envAmtSm += (envAmtTarget - envAmtSm) * smooth;
+            keyTrackSm += (keyTrackTarget - keyTrackSm) * smooth;
+            driveSm += (driveTarget - driveSm) * smooth;
+            fAtkSm += (fAtkTarget - fAtkSm) * smooth;
+            fDecSm += (fDecTarget - fDecSm) * smooth;
+            fSRSm += (fSRTarget - fSRSm) * smooth;
+            aAtkSm += (aAtkTarget - aAtkSm) * smooth;
+            aDecSm += (aDecTarget - aDecSm) * smooth;
+            aSRSm += (aSRTarget - aSRSm) * smooth;
+            lfoRateSm += (lfoRateTarget - lfoRateSm) * smooth;
+            lfoAmtSm += (lfoAmtTarget - lfoAmtSm) * smooth;
+            vintageSm += (vintageTarget - vintageSm) * smooth;
+
+            float lfo = float (sin (float64 (twoPi) * lfoPhase));
+            lfoPhase += float64 (lfoRateSm) * float64 (dt);
+            if (lfoPhase &gt;= 1.0)
+                lfoPhase -= 1.0;
+
+            float detuneRatio = centRatio (detuneSm);
+            float mixA = float (cos (float64 (oscMixSm) * float64 (pi * 0.5)));
+            float mixB = float (sin (float64 (oscMixSm) * float64 (pi * 0.5)));
+
+            float filSus = mapSustain (fSRSm);
+            float filRel = mapReleaseSeconds (fSRSm);
+            float ampSus = mapSustain (aSRSm);
+            float ampRel = mapReleaseSeconds (aSRSm);
+
+            float left = 0.0f;
+            float right = 0.0f;
+
+            for (int i = 0; i &lt; 8; ++i)
+            {
+                if (!voices.at(i).active)
+                    continue;
+
+                if (voices.at(i).ampStage == 1 &amp;&amp; voices.at(i).ampEnv &gt;= 0.999f) voices.at(i).ampStage = 2;
+                if (voices.at(i).ampStage == 2 &amp;&amp; abs (voices.at(i).ampEnv - ampSus) &lt; 0.002f) voices.at(i).ampStage = 3;
+                if (voices.at(i).filStage == 1 &amp;&amp; voices.at(i).filEnv &gt;= 0.999f) voices.at(i).filStage = 2;
+                if (voices.at(i).filStage == 2 &amp;&amp; abs (voices.at(i).filEnv - filSus) &lt; 0.002f) voices.at(i).filStage = 3;
+
+                voices.at(i).ampEnv = envStep (voices.at(i).ampEnv, voices.at(i).ampStage, voices.at(i).gate, aAtkSm, aDecSm, ampSus, ampRel, dt);
+                voices.at(i).filEnv = envStep (voices.at(i).filEnv, voices.at(i).filStage, voices.at(i).gate, fAtkSm, fDecSm, filSus, filRel, dt);
+
+                if (voices.at(i).ampStage == 4 &amp;&amp; voices.at(i).ampEnv &lt;= 0.00002f)
+                {
+                    voices.at(i).active = false;
+                    continue;
+                }
+
+                float driftDepth = (0.0004f + driftSm * 0.003f) * (0.2f + vintageSm * 0.8f);
+                voices.at(i).driftVel += nextNoise() * driftDepth * 0.003f;
+                voices.at(i).driftVel *= 0.9993f;
+                voices.at(i).driftWalk = clamp (voices.at(i).driftWalk + voices.at(i).driftVel, -1.0f, 1.0f);
+
+                float voiceDetune = 1.0f + voices.at(i).driftWalk * driftDepth;
+                float lfoPitch = lfo * lfoAmtSm * 0.0017f;
+                float vFreq = voices.at(i).frequency * voiceDetune * (1.0f + lfoPitch);
+
+                voices.at(i).phase1 += float64 (vFreq) * float64 (dt);
+                voices.at(i).phase2 += float64 (vFreq * detuneRatio) * float64 (dt);
+                if (voices.at(i).phase1 &gt;= 1.0) voices.at(i).phase1 -= 1.0;
+                if (voices.at(i).phase2 &gt;= 1.0) voices.at(i).phase2 -= 1.0;
+
+                float osc1 = morphWave (voices.at(i).phase1, shapeSm);
+                float osc2 = morphWave (voices.at(i).phase2, shapeSm);
+                float mix = osc1 * mixA + osc2 * mixB;
+                mix = softSat (mix, 0.12f + driveSm * 0.35f);
+
+                float keyHz = std::notes::noteToFrequency (voices.at(i).noteNumber);
+                float keyInfluence = (keyHz - 261.63f) * (0.003f * keyTrackSm);
+                float lfoFilter = lfo * lfoAmtSm * 240.0f;
+                float vintageCut = voices.at(i).driftWalk * vintageSm * 120.0f;
+                float envCut = envAmtSm * voices.at(i).filEnv * 5200.0f;
+                float cutoff = clamp (cutoffSm + keyInfluence + lfoFilter + vintageCut + envCut, 20.0f, 18000.0f);
+
+                float g = clamp (2.0f * float (pi) * cutoff * dt, 0.0f, 1.0f);
+                float resonance = clamp (resSm * 0.86f, 0.0f, 0.95f);
+                float x = mix - voices.at(i).f4 * resonance;
+
+                voices.at(i).f1 += g * (x - voices.at(i).f1);
+                voices.at(i).f2 += g * (voices.at(i).f1 - voices.at(i).f2);
+                voices.at(i).f3 += g * (voices.at(i).f2 - voices.at(i).f3);
+                voices.at(i).f4 += g * (voices.at(i).f3 - voices.at(i).f4);
+
+                float amp = voices.at(i).ampEnv * voices.at(i).velocity;
+                float voiceOut = softSat (voices.at(i).f4, driveSm * 0.25f) * amp;
+
+                float pan = (float (i) / 7.0f - 0.5f) * (0.22f + vintageSm * 0.28f);
+                float lg = 0.707f * (1.0f - pan);
+                float rg = 0.707f * (1.0f + pan);
+
+                left += voiceOut * lg;
+                right += voiceOut * rg;
+            }
+
+            out &lt;- float&lt;2&gt; (left * 0.18f, right * 0.18f);
+            advance();
+        }
+    }
+}
+</Code>
+</AmorphAlgorithm>
