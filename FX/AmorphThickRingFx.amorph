@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<AmorphAlgorithm name="AmorphThickRingFx" date="2026-02-18T20:44:18.862+09:00">
+<AmorphAlgorithm name="AmorphThickRingFx" date="2026-02-18T21:14:49.058+09:00">
   <PresentationConfig title="AmorphThickRingFx" author="to4kawa" paramCount="4" highlightColour="ffff466e"
                       backgroundColour="ff1e1e1e" autoGenerateUiCode="0" uiScale="1.0"
-                      labWidth="1020" labHeight="750" presentationWidth="980" presentationHeight="1178">
+                      labWidth="1020" labHeight="750" presentationWidth="1020" presentationHeight="400">
     <ParameterNames>
       <Param index="0" name="Thick"/>
       <Param index="1" name="Freeze"/>
@@ -32,19 +32,22 @@
     input event float param1 [[ name: &quot;Thick&quot;,   min: 0.0, max: 1.0, init: 0.35, step: 0.01 ]];
     input event float param2 [[ name: &quot;Freeze&quot;,  min: 0.0, max: 1.0, init: 0.0,  step: 1.0  ]];
     input event float param3 [[ name: &quot;LP Damp&quot;, min: 0.0, max: 1.0, init: 0.20, step: 0.01 ]];
+    input event float param4 [[ name: &quot;Wet&quot;,     min: 0.0, max: 1.0, init: 0.70, step: 0.01 ]];
 
-    float thick = 0.35f;
+    float thick  = 0.35f;
     float freeze = 0.0f;
-    float damp = 0.20f;
-
-    event param1 (float v) { thick  = clampf(v, 0.0f, 1.0f); }
-    event param2 (float v) { freeze = clampf(v, 0.0f, 1.0f); }
-    event param3 (float v) { damp   = clampf(v, 0.0f, 1.0f); }
+    float damp   = 0.20f;
+    float wet    = 0.70f;
 
     float clampf (float x, float lo, float hi) { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
     int   clampi (int x, int lo, int hi)       { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
 
-    // 200ms @ 48k = 9600 samples (covers common rates)
+    event param1 (float v) { thick  = clampf(v, 0.0f, 1.0f); }
+    event param2 (float v) { freeze = clampf(v, 0.0f, 1.0f); }
+    event param3 (float v) { damp   = clampf(v, 0.0f, 1.0f); }
+    event param4 (float v) { wet    = clampf(v, 0.0f, 1.0f); }
+
+    // 200ms @ 48k = 9600 samples
     const int maxRing = 9600;
 
     float[maxRing] ringL;
@@ -108,8 +111,6 @@
     float lpStateL = 0.0f;
     float lpStateR = 0.0f;
 
-    float prevFreeze = 0.0f;
-
     void main()
     {
         clearRing();
@@ -119,17 +120,14 @@
             float dt = float (processor.period);
             float sr = 1.0f / dt;
 
-            // Stable ring length: always sized for 200ms (no resizing pops)
+            // Stable ring length: always sized for 200ms
             ringLen = clampi (int (0.200f * sr) + 4, 64, maxRing);
             wr = wrapIndex (wr, ringLen);
-
-            bool wasFrozen = prevFreeze &gt;= 0.5f;
-            bool isFrozen  = freeze     &gt;= 0.5f;
-            prevFreeze = freeze;
 
             float&lt;2&gt; x = in;
 
             // Write unless frozen
+            bool isFrozen = (freeze &gt;= 0.5f);
             if (!isFrozen)
             {
                 ringL[wr] = x[0];
@@ -142,11 +140,11 @@
             // Map Thick (0..1) -&gt; tap delays + mod + mix + saturation
             float t = thick;
 
-            float baseMs   = 3.0f  + 15.0f * t;     // 3..18ms
-            float depthMs  = 0.0f  + 2.5f  * t;     // 0..2.5ms
-            float rateHz   = 0.15f + 1.05f * t;     // 0.15..1.2Hz
-            float tapMix   = 0.0f  + 0.70f * t;     // 0..0.70
-            float satAmt   = 0.0f  + 0.55f * t;     // 0..0.55
+            float baseMs  = 3.0f  + 15.0f * t;   // 3..18ms
+            float depthMs = 0.0f  + 2.5f  * t;   // 0..2.5ms
+            float rateHz  = 0.15f + 1.05f * t;   // 0.15..1.2Hz
+            float tapMix  = 0.0f  + 0.70f * t;   // 0..0.70
+            float satAmt  = 0.0f  + 0.55f * t;   // 0..0.55
 
             float lfo = float (sin (float64 (twoPi) * float64 (lfoPhase)));
             lfoPhase += rateHz * dt;
@@ -174,11 +172,11 @@
             float thickL = (tap1L + tap2L) * 0.5f;
             float thickR = (tap1R + tap2R) * 0.5f;
 
-            // Saturate only thick component (adds density)
+            // Saturate only thick component
             thickL = softSat (thickL, satAmt);
             thickR = softSat (thickR, satAmt);
 
-            // LP damp only on thick component (smoothness knob)
+            // LP damp only on thick component
             float dampCoef = 0.02f + damp * 0.90f;
             lpStateL = lpStateL + dampCoef * (thickL - lpStateL);
             lpStateR = lpStateR + dampCoef * (thickR - lpStateR);
@@ -186,8 +184,11 @@
             thickL = lpStateL * tapMix;
             thickR = lpStateR * tapMix;
 
-            // Final: dry + thickener (no delay mix)
-            out &lt;- float&lt;2&gt; (x[0] + thickL, x[1] + thickR);
+            // Wet = amount of thickener only (dry stays constant)
+            float outL = x[0] + thickL * wet;
+            float outR = x[1] + thickR * wet;
+
+            out &lt;- float&lt;2&gt; (outL, outR);
             advance();
         }
     }
@@ -273,8 +274,8 @@ class DialControl
         const norm = denom &gt; 0 ? (this.value - this.min) / denom : 0;
         const clampedNorm = this.clamp(norm, 0, 1);
         const angle = -135 + clampedNorm * 270;
-        this.knob.style.setProperty(&quot;--angle&quot;, `${angle}deg`);
-        this.knob.style.setProperty(&quot;--norm&quot;, `${clampedNorm}`);
+        this.knob.style.setProperty(&quot;--angle&quot;, &#96;${angle}deg&#96;);
+        this.knob.style.setProperty(&quot;--norm&quot;, &#96;${clampedNorm}&#96;);
         this.knob.classList.toggle(&quot;is-toggle&quot;, this.isToggle);
         this.knob.classList.toggle(&quot;is-on&quot;, this.isToggle &amp;&amp; this.value &gt;= 0.5);
     }
@@ -468,7 +469,7 @@ class AutoDialsPatchView extends HTMLElement
         const base = clamped.toFixed(decimals);
 
         if (spec.unit &amp;&amp; spec.unit.length &gt; 0)
-            return `${base}${spec.unit === &quot;ms&quot; ? &quot; ms&quot; : &quot; &quot; + spec.unit}`;
+            return &#96;${base}${spec.unit === &quot;ms&quot; ? &quot; ms&quot; : &quot; &quot; + spec.unit}&#96;;
 
         return base;
     }
@@ -486,21 +487,21 @@ class AutoDialsPatchView extends HTMLElement
     getHTML()
     {
         const controls = this.paramSpecs.map((spec) =&gt;
-            `<div class="control" data-param="${spec.id}" data-min="${spec.min}" data-max="${spec.max}" data-step="${spec.step}" data-init="${spec.init}">
-                <div class="knob">
-                    <div class="knob-track"></div>
-                    <div class="knob-fill"></div>
-                    <div class="knob-core"></div>
-                    <div class="control-value">${this.formatValue(spec, spec.init)}</div>
-                </div>
-                <div class="control-label">${this.escapeHTML(spec.label)}</div>
-            </div>`).join("");
+            &#96;&lt;div class=&quot;control&quot; data-param=&quot;${spec.id}&quot; data-min=&quot;${spec.min}&quot; data-max=&quot;${spec.max}&quot; data-step=&quot;${spec.step}&quot; data-init=&quot;${spec.init}&quot;&gt;
+                &lt;div class=&quot;knob&quot;&gt;
+                    &lt;div class=&quot;knob-track&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-fill&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;knob-core&quot;&gt;&lt;/div&gt;
+                    &lt;div class=&quot;control-value&quot;&gt;${this.formatValue(spec, spec.init)}&lt;/div&gt;
+                &lt;/div&gt;
+                &lt;div class=&quot;control-label&quot;&gt;${this.escapeHTML(spec.label)}&lt;/div&gt;
+            &lt;/div&gt;&#96;).join(&quot;&quot;);
 
-        return `
-            <style>
+        return &#96;
+            &lt;style&gt;
                 .auto-ui-root, .auto-ui-root * {
                     box-sizing: border-box;
-                    font-family: "Space Grotesk", sans-serif;
+                    font-family: &quot;Space Grotesk&quot;, sans-serif;
                     user-select: none;
                     -webkit-user-select: none;
                 }
@@ -626,12 +627,12 @@ class AutoDialsPatchView extends HTMLElement
                     text-align: center;
                     min-height: 14px;
                 }
-            </style>
-            <div class="auto-ui-shell">
-                <div class="auto-ui-title">Controls</div>
-                <div class="controls-grid">${controls}</div>
-            </div>
-        `;
+            &lt;/style&gt;
+            &lt;div class=&quot;auto-ui-shell&quot;&gt;
+                &lt;div class=&quot;auto-ui-title&quot;&gt;Controls&lt;/div&gt;
+                &lt;div class=&quot;controls-grid&quot;&gt;${controls}&lt;/div&gt;
+            &lt;/div&gt;
+        &#96;;
     }
 }
 
