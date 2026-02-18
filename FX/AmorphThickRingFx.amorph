@@ -1,0 +1,647 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="AmorphThickRingFx" date="2026-02-18T20:44:18.862+09:00">
+  <PresentationConfig title="AmorphThickRingFx" author="to4kawa" paramCount="4" highlightColour="ffff466e"
+                      backgroundColour="ff1e1e1e" autoGenerateUiCode="0" uiScale="1.0"
+                      labWidth="1020" labHeight="750" presentationWidth="980" presentationHeight="1178">
+    <ParameterNames>
+      <Param index="0" name="Thick"/>
+      <Param index="1" name="Freeze"/>
+      <Param index="2" name="LP Damp"/>
+      <Param index="3" name="Wet"/>
+      <Param index="4" name="Param 5"/>
+      <Param index="5" name="Param 6"/>
+      <Param index="6" name="Param 7"/>
+      <Param index="7" name="Param 8"/>
+      <Param index="8" name="Param 9"/>
+      <Param index="9" name="Param 10"/>
+      <Param index="10" name="Param 11"/>
+      <Param index="11" name="Param 12"/>
+      <Param index="12" name="Param 13"/>
+      <Param index="13" name="Param 14"/>
+      <Param index="14" name="Param 15"/>
+      <Param index="15" name="Param 16"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>processor AmorphThickRingFx
+{
+    input  stream float&lt;2&gt; in;
+    output stream float&lt;2&gt; out;
+
+    // 0..1 = off..max thickness
+    input event float param1 [[ name: &quot;Thick&quot;,   min: 0.0, max: 1.0, init: 0.35, step: 0.01 ]];
+    input event float param2 [[ name: &quot;Freeze&quot;,  min: 0.0, max: 1.0, init: 0.0,  step: 1.0  ]];
+    input event float param3 [[ name: &quot;LP Damp&quot;, min: 0.0, max: 1.0, init: 0.20, step: 0.01 ]];
+
+    float thick = 0.35f;
+    float freeze = 0.0f;
+    float damp = 0.20f;
+
+    event param1 (float v) { thick  = clampf(v, 0.0f, 1.0f); }
+    event param2 (float v) { freeze = clampf(v, 0.0f, 1.0f); }
+    event param3 (float v) { damp   = clampf(v, 0.0f, 1.0f); }
+
+    float clampf (float x, float lo, float hi) { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
+    int   clampi (int x, int lo, int hi)       { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
+
+    // 200ms @ 48k = 9600 samples (covers common rates)
+    const int maxRing = 9600;
+
+    float[maxRing] ringL;
+    float[maxRing] ringR;
+
+    int wr = 0;
+    int ringLen = 4800;
+
+    int wrapIndex (int i, int n)
+    {
+        int idx = i;
+        while (idx &lt; 0)   idx += n;
+        while (idx &gt;= n)  idx -= n;
+        return idx;
+    }
+
+    float wrapPos (float p, int n)
+    {
+        float nf = float(n);
+        float x = p;
+        while (x &lt; 0.0f)  x += nf;
+        while (x &gt;= nf)   x -= nf;
+        return x;
+    }
+
+    float interpL (float p, int n)
+    {
+        float wp = wrapPos(p, n);
+        int i0 = int(wp);
+        int i1 = wrapIndex(i0 + 1, n);
+        float t = wp - float(i0);
+        return ringL.at(i0) + (ringL.at(i1) - ringL.at(i0)) * t;
+    }
+
+    float interpR (float p, int n)
+    {
+        float wp = wrapPos(p, n);
+        int i0 = int(wp);
+        int i1 = wrapIndex(i0 + 1, n);
+        float t = wp - float(i0);
+        return ringR.at(i0) + (ringR.at(i1) - ringR.at(i0)) * t;
+    }
+
+    float softSat (float x, float amt)
+    {
+        float a = 1.0f + amt * 6.0f;
+        return float (tanh (float64 (x * a)) / tanh (float64 (a)));
+    }
+
+    void clearRing()
+    {
+        for (int i = 0; i &lt; maxRing; ++i)
+        {
+            ringL[i] = 0.0f;
+            ringR[i] = 0.0f;
+        }
+        wr = 0;
+    }
+
+    float lfoPhase = 0.0f;
+    float lpStateL = 0.0f;
+    float lpStateR = 0.0f;
+
+    float prevFreeze = 0.0f;
+
+    void main()
+    {
+        clearRing();
+
+        loop
+        {
+            float dt = float (processor.period);
+            float sr = 1.0f / dt;
+
+            // Stable ring length: always sized for 200ms (no resizing pops)
+            ringLen = clampi (int (0.200f * sr) + 4, 64, maxRing);
+            wr = wrapIndex (wr, ringLen);
+
+            bool wasFrozen = prevFreeze &gt;= 0.5f;
+            bool isFrozen  = freeze     &gt;= 0.5f;
+            prevFreeze = freeze;
+
+            float&lt;2&gt; x = in;
+
+            // Write unless frozen
+            if (!isFrozen)
+            {
+                ringL[wr] = x[0];
+                ringR[wr] = x[1];
+
+                wr += 1;
+                if (wr &gt;= ringLen) wr = 0;
+            }
+
+            // Map Thick (0..1) -&gt; tap delays + mod + mix + saturation
+            float t = thick;
+
+            float baseMs   = 3.0f  + 15.0f * t;     // 3..18ms
+            float depthMs  = 0.0f  + 2.5f  * t;     // 0..2.5ms
+            float rateHz   = 0.15f + 1.05f * t;     // 0.15..1.2Hz
+            float tapMix   = 0.0f  + 0.70f * t;     // 0..0.70
+            float satAmt   = 0.0f  + 0.55f * t;     // 0..0.55
+
+            float lfo = float (sin (float64 (twoPi) * float64 (lfoPhase)));
+            lfoPhase += rateHz * dt;
+            if (lfoPhase &gt;= 1.0f) lfoPhase -= 1.0f;
+
+            float baseS  = baseMs  * 0.001f * sr;
+            float depthS = depthMs * 0.001f * sr;
+
+            // 2 taps with tiny stereo difference
+            float d1L = baseS + depthS * ( lfo);
+            float d1R = baseS + depthS * (-lfo);
+            float d2L = baseS * 0.63f + depthS * (-lfo * 0.7f);
+            float d2R = baseS * 0.63f + depthS * ( lfo * 0.7f);
+
+            float p1L = wrapPos (float (wr) - d1L, ringLen);
+            float p1R = wrapPos (float (wr) - d1R, ringLen);
+            float p2L = wrapPos (float (wr) - d2L, ringLen);
+            float p2R = wrapPos (float (wr) - d2R, ringLen);
+
+            float tap1L = interpL (p1L, ringLen);
+            float tap1R = interpR (p1R, ringLen);
+            float tap2L = interpL (p2L, ringLen);
+            float tap2R = interpR (p2R, ringLen);
+
+            float thickL = (tap1L + tap2L) * 0.5f;
+            float thickR = (tap1R + tap2R) * 0.5f;
+
+            // Saturate only thick component (adds density)
+            thickL = softSat (thickL, satAmt);
+            thickR = softSat (thickR, satAmt);
+
+            // LP damp only on thick component (smoothness knob)
+            float dampCoef = 0.02f + damp * 0.90f;
+            lpStateL = lpStateL + dampCoef * (thickL - lpStateL);
+            lpStateR = lpStateR + dampCoef * (thickR - lpStateR);
+
+            thickL = lpStateL * tapMix;
+            thickR = lpStateR * tapMix;
+
+            // Final: dry + thickener (no delay mix)
+            out &lt;- float&lt;2&gt; (x[0] + thickL, x[1] + thickR);
+            advance();
+        }
+    }
+}
+</Code>
+  <UICode>// @amorph-auto-ui-generated (fixed, no pointer line)
+class DialControl
+{
+    constructor (options)
+    {
+        this.patchConnection = options.patchConnection;
+        this.param = options.param;
+        this.knob = options.knob;
+        this.valueLabel = options.valueLabel;
+        this.formatValue = options.formatValue;
+        this.onChange = options.onChange;
+        this.min = options.min;
+        this.max = options.max;
+        this.step = options.step;
+        this.defaultValue = options.defaultValue;
+
+        if (! (this.max &gt; this.min))
+        {
+            this.min = 0;
+            this.max = 1;
+        }
+
+        if (! (this.step &gt; 0))
+            this.step = (this.max - this.min) / 100;
+        if (! (this.step &gt; 0))
+            this.step = 0.01;
+
+        this.value = this.defaultValue;
+        this.dragging = false;
+        this.startValue = this.value;
+        this.startY = 0;
+        this.activePointerId = null;
+
+        this.isToggle = (this.min === 0 &amp;&amp; this.max === 1 &amp;&amp; this.step === 1);
+
+        this.knob.addEventListener(&quot;pointerdown&quot;, (e) =&gt; this.onPointerDown(e));
+        this.knob.addEventListener(&quot;pointermove&quot;, (e) =&gt; this.onPointerMove(e));
+        this.knob.addEventListener(&quot;pointerup&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;pointercancel&quot;, (e) =&gt; this.onPointerUp(e));
+        this.knob.addEventListener(&quot;lostpointercapture&quot;, () =&gt; this.cancelDrag());
+        this.knob.addEventListener(&quot;dragstart&quot;, (e) =&gt; e.preventDefault());
+
+        this.knob.addEventListener(&quot;dblclick&quot;, () =&gt; this.setValue(this.defaultValue, true));
+
+        this.knob.addEventListener(&quot;click&quot;, () =&gt;
+        {
+            if (!this.isToggle) return;
+            this.setValue(this.value &lt; 0.5 ? 1 : 0, true);
+        });
+
+        this.setValue(this.defaultValue, false);
+    }
+
+    setValue (value, notify)
+    {
+        const numericValue = Number.isFinite(value) ? value : this.defaultValue;
+        const clamped = this.clamp(this.quantize(numericValue), this.min, this.max);
+
+        if (clamped === this.value)
+            return;
+
+        this.value = clamped;
+        this.updateVisuals();
+
+        if (this.valueLabel)
+            this.valueLabel.textContent = this.formatValue(this.value);
+
+        if (this.onChange)
+            this.onChange(this.value);
+
+        if (notify === true)
+            this.patchConnection.sendEventOrValue(this.param, this.value);
+    }
+
+    updateVisuals()
+    {
+        const denom = this.max - this.min;
+        const norm = denom &gt; 0 ? (this.value - this.min) / denom : 0;
+        const clampedNorm = this.clamp(norm, 0, 1);
+        const angle = -135 + clampedNorm * 270;
+        this.knob.style.setProperty(&quot;--angle&quot;, `${angle}deg`);
+        this.knob.style.setProperty(&quot;--norm&quot;, `${clampedNorm}`);
+        this.knob.classList.toggle(&quot;is-toggle&quot;, this.isToggle);
+        this.knob.classList.toggle(&quot;is-on&quot;, this.isToggle &amp;&amp; this.value &gt;= 0.5);
+    }
+
+    setDraggingState (isDragging)
+    {
+        this.dragging = isDragging;
+        this.knob.classList.toggle(&quot;is-dragging&quot;, isDragging);
+
+        const root = this.knob.closest(&quot;.auto-ui-root&quot;);
+        if (root)
+            root.classList.toggle(&quot;is-dragging&quot;, isDragging);
+    }
+
+    cancelDrag ()
+    {
+        this.setDraggingState(false);
+        this.activePointerId = null;
+    }
+
+    onPointerDown (e)
+    {
+        if (this.isToggle)
+            return;
+
+        if ((e.button !== undefined &amp;&amp; e.button !== 0) || e.isPrimary === false)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.startY = e.clientY;
+        this.startValue = this.value;
+        this.activePointerId = e.pointerId;
+        this.setDraggingState(true);
+
+        try { this.knob.setPointerCapture(e.pointerId); }
+        catch (_) {}
+    }
+
+    onPointerMove (e)
+    {
+        if (this.isToggle)
+            return;
+
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+
+        const delta = this.startY - e.clientY;
+        const range = this.max - this.min;
+        const sensitivity = range / 170;
+        const fine = e.shiftKey ? 0.2 : 1.0;
+        const nextValue = this.startValue + delta * sensitivity * fine;
+        this.setValue(nextValue, true);
+    }
+
+    onPointerUp (e)
+    {
+        if (this.isToggle)
+            return;
+
+        if (!this.dragging || this.activePointerId !== e.pointerId)
+            return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        this.setDraggingState(false);
+        this.activePointerId = null;
+
+        try
+        {
+            if (this.knob.hasPointerCapture(e.pointerId))
+                this.knob.releasePointerCapture(e.pointerId);
+        }
+        catch (_) {}
+    }
+
+    clamp (value, min, max)
+    {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    quantize (value)
+    {
+        if (!this.step || this.step &lt;= 0)
+            return value;
+        const steps = Math.round((value - this.min) / this.step);
+        return this.min + steps * this.step;
+    }
+}
+
+class AutoDialsPatchView extends HTMLElement
+{
+    constructor (patchConnection)
+    {
+        super();
+        this.patchConnection = patchConnection;
+        this.className = &quot;auto-ui-root&quot;;
+
+        this.paramSpecs = [
+        { id: &quot;param1&quot;, label: &quot;Thick&quot;,   min: 0.0, max: 1.0, step: 0.01, init: 0.35, unit: &quot;&quot;, labels: [] },
+        { id: &quot;param2&quot;, label: &quot;Freeze&quot;,  min: 0.0, max: 1.0, step: 1.0,  init: 0.0,  unit: &quot;&quot;, labels: [&quot;OFF&quot;,&quot;ON&quot;] },
+        { id: &quot;param3&quot;, label: &quot;LP Damp&quot;, min: 0.0, max: 1.0, step: 0.01, init: 0.20, unit: &quot;&quot;, labels: [] },
+        { id: &quot;param4&quot;, label: &quot;Wet&quot;,     min: 0.0, max: 1.0, step: 0.01, init: 0.70, unit: &quot;&quot;, labels: [] },
+        ];
+
+
+        this.innerHTML = this.getHTML();
+        this.controls = new Map();
+    }
+
+    connectedCallback()
+    {
+        const controlNodes = this.querySelectorAll(&quot;.control&quot;);
+        controlNodes.forEach((controlNode) =&gt;
+        {
+            const param = controlNode.dataset.param;
+            const spec = this.paramSpecs.find((s) =&gt; s.id === param);
+            if (!spec) return;
+
+            const knob = controlNode.querySelector(&quot;.knob&quot;);
+            const valueLabel = controlNode.querySelector(&quot;.control-value&quot;);
+            if (!knob || !valueLabel) return;
+
+            const dial = new DialControl({
+                patchConnection: this.patchConnection,
+                param,
+                knob,
+                valueLabel,
+                min: Number(spec.min),
+                max: Number(spec.max),
+                step: Number(spec.step),
+                defaultValue: Number(spec.init),
+                formatValue: (value) =&gt; this.formatValue(spec, value),
+                onChange: () =&gt; {}
+            });
+
+            this.controls.set(param, dial);
+            this.patchConnection.requestParameterValue(param);
+        });
+
+        this.paramListener = (event) =&gt;
+        {
+            const control = this.controls.get(event.endpointID);
+            if (!control) return;
+            if (control.dragging) return;
+            control.setValue(Number(event.value), false);
+        };
+
+        this.patchConnection.addAllParameterListener(this.paramListener);
+    }
+
+    disconnectedCallback()
+    {
+        this.controls.forEach((control) =&gt; control.cancelDrag());
+        if (this.paramListener)
+            this.patchConnection.removeAllParameterListener(this.paramListener);
+    }
+
+    getDecimals (step)
+    {
+        if (!Number.isFinite(step) || step &lt;= 0)
+            return 2;
+
+        const text = String(step);
+        const dot = text.indexOf(&quot;.&quot;);
+        if (dot &lt; 0) return 0;
+        return Math.min(6, text.length - dot - 1);
+    }
+
+    formatValue (spec, value)
+    {
+        const numericValue = Number.isFinite(value) ? value : Number(spec.init) || 0;
+        const min = Number.isFinite(spec.min) ? spec.min : 0;
+        const max = Number.isFinite(spec.max) ? spec.max : 1;
+        const clamped = Math.max(min, Math.min(max, numericValue));
+
+        if (Array.isArray(spec.labels) &amp;&amp; spec.labels.length &gt; 0)
+        {
+            const step = Number.isFinite(spec.step) &amp;&amp; spec.step &gt; 0 ? spec.step : 1;
+            let index = Math.round((clamped - min) / step);
+            if (!Number.isFinite(index)) index = 0;
+            index = Math.max(0, Math.min(spec.labels.length - 1, index));
+            return String(spec.labels[index]);
+        }
+
+        const decimals = this.getDecimals(spec.step);
+        const base = clamped.toFixed(decimals);
+
+        if (spec.unit &amp;&amp; spec.unit.length &gt; 0)
+            return `${base}${spec.unit === &quot;ms&quot; ? &quot; ms&quot; : &quot; &quot; + spec.unit}`;
+
+        return base;
+    }
+
+    escapeHTML (text)
+    {
+        return String(text)
+            .replaceAll(&quot;&amp;&quot;, &quot;&amp;amp;&quot;)
+            .replaceAll(&quot;&lt;&quot;, &quot;&amp;lt;&quot;)
+            .replaceAll(&quot;&gt;&quot;, &quot;&amp;gt;&quot;)
+            .replaceAll(&quot;\&quot;&quot;, &quot;&amp;quot;&quot;)
+            .replaceAll(&quot;'&quot;, &quot;&amp;#39;&quot;);
+    }
+
+    getHTML()
+    {
+        const controls = this.paramSpecs.map((spec) =&gt;
+            `<div class="control" data-param="${spec.id}" data-min="${spec.min}" data-max="${spec.max}" data-step="${spec.step}" data-init="${spec.init}">
+                <div class="knob">
+                    <div class="knob-track"></div>
+                    <div class="knob-fill"></div>
+                    <div class="knob-core"></div>
+                    <div class="control-value">${this.formatValue(spec, spec.init)}</div>
+                </div>
+                <div class="control-label">${this.escapeHTML(spec.label)}</div>
+            </div>`).join("");
+
+        return `
+            <style>
+                .auto-ui-root, .auto-ui-root * {
+                    box-sizing: border-box;
+                    font-family: "Space Grotesk", sans-serif;
+                    user-select: none;
+                    -webkit-user-select: none;
+                }
+
+                .auto-ui-shell {
+                    min-height: 100%;
+                    padding: 18px;
+                    color: #dfe4eb;
+                    background: radial-gradient(900px 520px at 8% -4%, #2a313c 0%, #1b212b 52%, #151a22 100%);
+                }
+
+                .auto-ui-title {
+                    margin: 0 0 16px;
+                    letter-spacing: 0.06em;
+                    font-size: 12px;
+                    color: #9ca6b4;
+                }
+
+                .controls-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+                    gap: 14px;
+                }
+
+                .control {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 8px 6px 4px;
+                }
+
+                .auto-ui-root.is-dragging,
+                .auto-ui-root.is-dragging * {
+                    cursor: ns-resize !important;
+                }
+
+                .knob {
+                    position: relative;
+                    width: 72px;
+                    height: 72px;
+                    --angle: -135deg;
+                    --norm: 0;
+                    cursor: ns-resize;
+                    touch-action: none;
+                    -webkit-tap-highlight-color: transparent;
+                }
+
+                .knob.is-toggle {
+                    cursor: pointer;
+                }
+
+                .knob-track,
+                .knob-fill,
+                .knob-core {
+                    position: absolute;
+                    border-radius: 50%;
+                }
+
+                .knob-track,
+                .knob-fill {
+                    inset: 0;
+                    --ring-thickness: 5px;
+                    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                    mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-thickness)), #000 calc(100% - var(--ring-thickness)));
+                }
+
+                .knob-track {
+                    background: conic-gradient(
+                        from -135deg,
+                        rgba(176, 193, 216, 0.18) 0deg 270deg,
+                        transparent 270deg 360deg
+                    );
+                }
+
+                .knob-fill {
+                    background: conic-gradient(
+                        from -135deg,
+                        rgba(178, 200, 229, 0.45) 0deg,
+                        #dce7f5 calc(var(--norm) * 270deg),
+                        transparent calc(var(--norm) * 270deg) 360deg
+                    );
+                    filter: drop-shadow(0 0 5px rgba(220, 232, 248, 0.22));
+                }
+
+                .knob-core {
+                    inset: 6px;
+                    background: linear-gradient(180deg, rgba(18, 23, 32, 0.86) 0%, rgba(10, 14, 21, 0.92) 100%);
+                    border: 1px solid rgba(141, 159, 184, 0.26);
+                    box-shadow:
+                        inset 0 1px 1px rgba(255, 255, 255, 0.08),
+                        0 1px 2px rgba(0, 0, 0, 0.35);
+                }
+
+                .knob.is-toggle.is-on .knob-core {
+                    border-color: rgba(220, 232, 248, 0.55);
+                    box-shadow:
+                        inset 0 1px 1px rgba(255, 255, 255, 0.10),
+                        0 0 0 2px rgba(220, 232, 248, 0.12),
+                        0 1px 2px rgba(0, 0, 0, 0.35);
+                }
+
+                .control-value {
+                    position: absolute;
+                    inset: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: 0.02em;
+                    color: #dce7f7;
+                    text-align: center;
+                    text-shadow: 0 0 8px rgba(220, 232, 248, 0.2);
+                    pointer-events: none;
+                }
+
+                .control-label {
+                    font-size: 12px;
+                    letter-spacing: 0.03em;
+                    color: #c5ccd7;
+                    text-align: center;
+                    min-height: 14px;
+                }
+            </style>
+            <div class="auto-ui-shell">
+                <div class="auto-ui-title">Controls</div>
+                <div class="controls-grid">${controls}</div>
+            </div>
+        `;
+    }
+}
+
+export default function createPatchView (patchConnection)
+{
+    const name = &quot;amorph-auto-dials-view&quot;;
+    if (!window.customElements.get(name))
+        window.customElements.define(name, AutoDialsPatchView);
+
+    return new (window.customElements.get(name)) (patchConnection);
+}
+</UICode>
+</AmorphAlgorithm>
