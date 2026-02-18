@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AmorphAlgorithm name="AmorphThereminFx" date="2026-02-19T00:00:00.000+09:00">
+  <PresentationConfig title="AmorphThereminFx" author="to4kawa" paramCount="4" highlightColour="ffff466e"
+                      backgroundColour="ff1e1e1e" autoGenerateUiCode="1" uiScale="1.0"
+                      labWidth="1020" labHeight="750" presentationWidth="1020" presentationHeight="400">
+    <ParameterNames>
+      <Param index="0" name="Theremin"/>
+      <Param index="1" name="Glide"/>
+      <Param index="2" name="Vibrato"/>
+      <Param index="3" name="Air"/>
+      <Param index="4" name="Param 5"/>
+      <Param index="5" name="Param 6"/>
+      <Param index="6" name="Param 7"/>
+      <Param index="7" name="Param 8"/>
+      <Param index="8" name="Param 9"/>
+      <Param index="9" name="Param 10"/>
+      <Param index="10" name="Param 11"/>
+      <Param index="11" name="Param 12"/>
+      <Param index="12" name="Param 13"/>
+      <Param index="13" name="Param 14"/>
+      <Param index="14" name="Param 15"/>
+      <Param index="15" name="Param 16"/>
+    </ParameterNames>
+  </PresentationConfig>
+  <Code>processor AmorphThereminFx
+{
+    input  stream float&lt;2&gt; in;
+    output stream float&lt;2&gt; out;
+
+    input event float param1 [[ name: &quot;Theremin&quot;, min: 0.0, max: 1.0, init: 0.60, step: 0.01 ]];
+    input event float param2 [[ name: &quot;Glide&quot;,    min: 0.0, max: 1.0, init: 0.45, step: 0.01 ]];
+    input event float param3 [[ name: &quot;Vibrato&quot;,  min: 0.0, max: 1.0, init: 0.35, step: 0.01 ]];
+    input event float param4 [[ name: &quot;Air&quot;,      min: 0.0, max: 1.0, init: 0.20, step: 0.01 ]];
+
+    float theremin = 0.60f;
+    float glide = 0.45f;
+    float vibrato = 0.35f;
+    float air = 0.20f;
+
+    event param1 (float v) { theremin = clamp(v, 0.0f, 1.0f); }
+    event param2 (float v) { glide    = clamp(v, 0.0f, 1.0f); }
+    event param3 (float v) { vibrato  = clamp(v, 0.0f, 1.0f); }
+    event param4 (float v) { air      = clamp(v, 0.0f, 1.0f); }
+
+    float env = 0.0f;
+    float envSlow = 0.0f;
+
+    float lastMono = 0.0f;
+    int samplesSinceCross = 0;
+    float detectedHz = 220.0f;
+
+    float followHz = 220.0f;
+    float64 thereminPhase = 0.0;
+    float64 vibPhase = 0.0;
+
+    float noiseSeed = 0.7345f;
+    float airHighL = 0.0f;
+    float airHighR = 0.0f;
+    float airLowL = 0.0f;
+    float airLowR = 0.0f;
+
+    float softSat (float x, float amt)
+    {
+        float drive = 1.0f + amt * 5.0f;
+        return float (tanh (float64 (x * drive)) / tanh (float64 (drive)));
+    }
+
+    float nextNoise()
+    {
+        noiseSeed = fract (noiseSeed * 123.4567f + 0.34567f);
+        return noiseSeed * 2.0f - 1.0f;
+    }
+
+    void main()
+    {
+        loop
+        {
+            float dt = float (processor.period);
+            float sr = 1.0f / dt;
+
+            float&lt;2&gt; dry = in;
+            float mono = 0.5f * (dry[0] + dry[1]);
+
+            float absMono = abs (mono);
+            float envAtk = 0.08f;
+            float envRel = 0.0025f;
+            if (absMono &gt; env)
+                env = env + envAtk * (absMono - env);
+            else
+                env = env + envRel * (absMono - env);
+
+            envSlow = envSlow + 0.0035f * (env - envSlow);
+
+            samplesSinceCross += 1;
+            bool risingZero = (lastMono &lt;= 0.0f &amp;&amp; mono &gt; 0.0f);
+            if (risingZero)
+            {
+                if (samplesSinceCross &gt; 8)
+                {
+                    float hz = sr / float (samplesSinceCross);
+                    if (hz &gt; 55.0f &amp;&amp; hz &lt; 1800.0f)
+                        detectedHz = detectedHz + 0.25f * (hz - detectedHz);
+                }
+                samplesSinceCross = 0;
+            }
+            lastMono = mono;
+
+            float bright = clamp ((env - envSlow) * 8.0f + 0.5f, 0.0f, 1.0f);
+            float pseudoHz = 120.0f + bright * 1000.0f;
+
+            float trackedHz = detectedHz * (0.85f + env * 0.8f);
+            trackedHz = clamp (trackedHz, 70.0f, 2000.0f);
+
+            float targetHz = trackedHz * (0.85f + theremin * 0.15f) + pseudoHz * (0.15f + 0.35f * air);
+            targetHz = clamp (targetHz, 80.0f, 2200.0f);
+
+            float glideTime = 0.005f + glide * 0.250f;
+            float followCoef = clamp (dt / glideTime, 0.0f, 1.0f);
+            followHz = followHz + followCoef * (targetHz - followHz);
+
+            float vibRate = 4.2f + vibrato * 4.8f;
+            float vibDepth = (0.0005f + 0.010f * vibrato) * (0.2f + env * 1.2f);
+
+            vibPhase += float64 (vibRate * dt);
+            if (vibPhase &gt;= 1.0) vibPhase -= 1.0;
+
+            float vib = float (sin (float64 (twoPi) * vibPhase));
+            float oscHz = followHz * (1.0f + vib * vibDepth);
+
+            thereminPhase += float64 (oscHz * dt);
+            if (thereminPhase &gt;= 1.0) thereminPhase -= 1.0;
+
+            float sinTone = float (sin (float64 (twoPi) * thereminPhase));
+            float triTone = abs (float (thereminPhase * 4.0 - 2.0)) - 1.0f;
+            float voice = sinTone * 0.78f + triTone * 0.22f;
+
+            float breath = nextNoise() * (0.04f + 0.20f * air) * (0.15f + env * 0.9f);
+
+            float airFast = 0.03f + 0.25f * air;
+            float airSlowCoef = 0.002f + 0.020f * air;
+
+            airHighL = airHighL + airFast * (breath - airHighL);
+            airHighR = airHighR + airFast * ((breath * 0.83f) - airHighR);
+            airLowL = airLowL + airSlowCoef * (airHighL - airLowL);
+            airLowR = airLowR + airSlowCoef * (airHighR - airLowR);
+
+            float airyL = (airHighL - airLowL) * (0.2f + air * 0.8f);
+            float airyR = (airHighR - airLowR) * (0.2f + air * 0.8f);
+
+            float voiceAmp = env * (0.2f + 1.25f * theremin);
+            float thermo = softSat (voice * voiceAmp, theremin * 0.5f + 0.15f);
+
+            float wetGain = theremin;
+            float outL = dry[0] * (1.0f - 0.55f * wetGain) + (thermo + airyL) * wetGain;
+            float outR = dry[1] * (1.0f - 0.55f * wetGain) + (thermo + airyR) * wetGain;
+
+            out &lt;- float&lt;2&gt; (outL, outR);
+            advance();
+        }
+    }
+}
+</Code>
+  <UICode>// Auto UI</UICode>
+</AmorphAlgorithm>
