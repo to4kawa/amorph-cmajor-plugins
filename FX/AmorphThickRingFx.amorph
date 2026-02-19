@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <AmorphAlgorithm name="AmorphThickRingFx" date="2026-02-18T21:14:49.058+09:00">
-  <PresentationConfig title="AmorphThickRingFx" author="to4kawa" paramCount="4" highlightColour="ffff466e"
+  <PresentationConfig title="AmorphThickRingFx" author="to4kawa" paramCount="5" highlightColour="ffff466e"
                       backgroundColour="ff1e1e1e" autoGenerateUiCode="0" uiScale="1.0"
                       labWidth="1020" labHeight="750" presentationWidth="1020" presentationHeight="400">
     <ParameterNames>
@@ -9,7 +9,7 @@
       <Param index="1" name="Freeze"/>
       <Param index="2" name="LP Damp"/>
       <Param index="3" name="Wet"/>
-      <Param index="4" name="Param 5"/>
+      <Param index="4" name="Tone Add"/>
       <Param index="5" name="Param 6"/>
       <Param index="6" name="Param 7"/>
       <Param index="7" name="Param 8"/>
@@ -33,11 +33,13 @@
     input event float param2 [[ name: &quot;Freeze&quot;,  min: 0.0, max: 1.0, init: 0.0,  step: 1.0  ]];
     input event float param3 [[ name: &quot;LP Damp&quot;, min: 0.0, max: 1.0, init: 0.20, step: 0.01 ]];
     input event float param4 [[ name: &quot;Wet&quot;,     min: 0.0, max: 1.0, init: 0.70, step: 0.01 ]];
+    input event float param5 [[ name: &quot;Tone Add&quot;, min: 0.0, max: 1.0, init: 0.50, step: 0.01 ]];
 
     float thick  = 0.35f;
     float freeze = 0.0f;
     float damp   = 0.20f;
     float wet    = 0.70f;
+    float toneAdd = 0.50f;
 
     float clampf (float x, float lo, float hi) { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
     int   clampi (int x, int lo, int hi)       { return x &lt; lo ? lo : (x &gt; hi ? hi : x); }
@@ -46,6 +48,7 @@
     event param2 (float v) { freeze = clampf(v, 0.0f, 1.0f); }
     event param3 (float v) { damp   = clampf(v, 0.0f, 1.0f); }
     event param4 (float v) { wet    = clampf(v, 0.0f, 1.0f); }
+    event param5 (float v) { toneAdd = clampf(v, 0.0f, 1.0f); }
 
     // 200ms @ 48k = 9600 samples
     const int maxRing = 9600;
@@ -111,6 +114,32 @@
     float lpStateL = 0.0f;
     float lpStateR = 0.0f;
 
+    // Tone Add states (parallel additive bands)
+    float lowStateL = 0.0f;
+    float lowStateR = 0.0f;
+    float noiseHPStateL = 0.0f;
+    float noiseHPStateR = 0.0f;
+    float envState = 0.0f;
+    uint32 noiseSeed = 0x12345678u;
+
+    float onePoleLPCoef (float cutoff, float sr)
+    {
+        float x = -twoPi * cutoff / sr;
+        return 1.0f - float (exp (float64 (x)));
+    }
+
+    float bandSat (float x, float amt)
+    {
+        return softSat (x, 0.08f + amt * 0.35f);
+    }
+
+    float nextNoise()
+    {
+        noiseSeed = noiseSeed * 1664525u + 1013904223u;
+        float uni = float (noiseSeed &amp; 0x00ffffffu) / 16777215.0f;
+        return uni * 2.0f - 1.0f;
+    }
+
     void main()
     {
         clearRing();
@@ -125,6 +154,36 @@
             wr = wrapIndex (wr, ringLen);
 
             float&lt;2&gt; x = in;
+
+            float tone = toneAdd;
+            float lowAddAmt  = clampf (1.0f - tone * 1.5f, 0.0f, 1.0f);
+            float highAddAmt = clampf ((tone - 0.25f) / 0.75f, 0.0f, 1.0f);
+
+            // Low add: LP extract (120..200Hz) -&gt; soft sat -&gt; add back
+            float lowCut = 120.0f + 80.0f * lowAddAmt;
+            float lowA = onePoleLPCoef (lowCut, sr);
+            lowStateL += lowA * (x[0] - lowStateL);
+            lowStateR += lowA * (x[1] - lowStateR);
+
+            float lowAddL = bandSat (lowStateL, lowAddAmt) * (0.35f * lowAddAmt);
+            float lowAddR = bandSat (lowStateR, lowAddAmt) * (0.35f * lowAddAmt);
+
+            // High add: envelope-followed air noise (HP 6k..10k)
+            float mono = (x[0] + x[1]) * 0.5f;
+            float envIn = abs (mono);
+            float envTarget = clampf (envIn * 1.8f, 0.0f, 1.0f);
+            float envCoef = envTarget &gt; envState ? 0.08f : 0.003f;
+            envState += envCoef * (envTarget - envState);
+
+            float hpCut = 6000.0f + 4000.0f * tone;
+            float hpA = onePoleLPCoef (hpCut, sr);
+            float nL = nextNoise();
+            float nR = nextNoise();
+            noiseHPStateL += hpA * (nL - noiseHPStateL);
+            noiseHPStateR += hpA * (nR - noiseHPStateR);
+
+            float airL = (nL - noiseHPStateL) * envState * (0.12f * highAddAmt);
+            float airR = (nR - noiseHPStateR) * envState * (0.12f * highAddAmt);
 
             // Write unless frozen
             bool isFrozen = (freeze &gt;= 0.5f);
@@ -184,9 +243,9 @@
             thickL = lpStateL * tapMix;
             thickR = lpStateR * tapMix;
 
-            // Wet = amount of thickener only (dry stays constant)
-            float outL = x[0] + thickL * wet;
-            float outR = x[1] + thickR * wet;
+            // Wet = amount of additive paths only (dry stays constant)
+            float outL = x[0] + (thickL + lowAddL + airL) * wet;
+            float outR = x[1] + (thickR + lowAddR + airR) * wet;
 
             out &lt;- float&lt;2&gt; (outL, outR);
             advance();
@@ -383,6 +442,7 @@ class AutoDialsPatchView extends HTMLElement
         { id: &quot;param2&quot;, label: &quot;Freeze&quot;,  min: 0.0, max: 1.0, step: 1.0,  init: 0.0,  unit: &quot;&quot;, labels: [&quot;OFF&quot;,&quot;ON&quot;] },
         { id: &quot;param3&quot;, label: &quot;LP Damp&quot;, min: 0.0, max: 1.0, step: 0.01, init: 0.20, unit: &quot;&quot;, labels: [] },
         { id: &quot;param4&quot;, label: &quot;Wet&quot;,     min: 0.0, max: 1.0, step: 0.01, init: 0.70, unit: &quot;&quot;, labels: [] },
+        { id: &quot;param5&quot;, label: &quot;Tone Add&quot;, min: 0.0, max: 1.0, step: 0.01, init: 0.50, unit: &quot;&quot;, labels: [] },
         ];
 
 
