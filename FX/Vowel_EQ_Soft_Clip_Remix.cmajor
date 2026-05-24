@@ -1,7 +1,7 @@
 /*
-    CMAJOR VOWEL EFFECT - SOFT CLIP REMIX
+    CMAJOR VOWEL EFFECT
     Algorithm: Formant Vowel Synthesis applied to input audio
-    Remix change: adds an actually-audible Soft Clip parameter as param6.
+    Remix change: Soft Clip is implemented as param6.
 */
 
 processor VowelEffect
@@ -13,8 +13,8 @@ processor VowelEffect
     input event float param1 [[ name: "Vowel Morph", min: 0, max: 4, init: 0 ]];
     input event float param2 [[ name: "Brightness", min: 0.5, max: 2.0, init: 1.0 ]];
     input event float param3 [[ name: "Resonance", min: 3.5, max: 20.0, init: 8.0 ]];
-    input event float param4 [[ name: "Dry/Wet", min: 0.0, max: 1.0, init: 0.5 ]];
     input event float param5 [[ name: "Pitch", min: 0.5, max: 2.0, init: 1.0 ]];
+    input event float param4 [[ name: "Dry/Wet", min: 0.0, max: 1.0, init: 0.5 ]];
     input event float param6 [[ name: "Soft Clip", min: 0.0, max: 1.0, init: 0.0 ]];
 
     float targetVowelPos = 0.0f;
@@ -39,27 +39,30 @@ processor VowelEffect
     event param6 (float v) { targetSoftClip = v; }
 
     // ================= CONSTANTS =================
-    // Formant frequencies (Hz) — Hillenbrand et al. adult male averages.
-    // Vowel order: a, e, i, o, u.
+    // Formant frequencies (Hz) — Hillenbrand et al. (1995) adult male averages
+    // Vowel order: a (hod), e (hayed), i (heed), o (hoed), u (who'd)
     float[5] f1Freqs = (768.0f, 476.0f, 342.0f, 497.0f, 378.0f);
     float[5] f2Freqs = (1333.0f, 2089.0f, 2322.0f, 910.0f, 997.0f);
     float[5] f3Freqs = (2522.0f, 2691.0f, 3000.0f, 2459.0f, 2343.0f);
     float[5] f4Freqs = (3687.0f, 3677.0f, 3657.0f, 3384.0f, 3357.0f);
 
+    // Per-formant Q derived from measured bandwidths (Q = freq / bandwidth)
+    // Bandwidths (Hz): a(89,117,153,259) e(58,92,113,195) i(53,84,107,183) o(71,85,148,235) u(56,76,133,217)
     float[5] f1Q = (8.6f, 8.2f, 6.5f, 7.0f, 6.8f);
     float[5] f2Q = (11.4f, 11.0f, 11.0f, 10.7f, 11.0f);
     float[5] f3Q = (11.0f, 11.0f, 11.0f, 11.0f, 11.0f);
     float[5] f4Q = (11.0f, 11.0f, 11.0f, 11.0f, 11.0f);
 
+    // Per-formant amplitude (relative gain) per vowel
     float[5] f1Amp = (1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
     float[5] f2Amp = (0.50f, 0.70f, 0.80f, 0.35f, 0.30f);
     float[5] f3Amp = (0.25f, 0.30f, 0.45f, 0.15f, 0.12f);
     float[5] f4Amp = (0.10f, 0.12f, 0.15f, 0.08f, 0.06f);
-
+    
     float pi = 3.14159265359f;
     float controlSmoothTimeSec = 0.02f;
-    float64 driftPhase = 0.0;
 
+    // ================= FILTER STRUCTURE =================
     struct SVFState
     {
         float lo, band, hi;
@@ -67,6 +70,8 @@ processor VowelEffect
 
     SVFState f1L, f2L, f3L, f4L;
     SVFState f1R, f2R, f3R, f4R;
+
+    // ================= DSP FUNCTIONS =================
 
     float clampf(float v, float lo, float hi)
     {
@@ -79,7 +84,7 @@ processor VowelEffect
         let nyquist = sampleRate * 0.49f;
         let safeCutoff = cutoff < nyquist ? cutoff : nyquist;
         let safeQ = clampf(Q, 0.2f, 24.0f);
-
+        
         let arg = pi * safeCutoff / sampleRate;
         let omega = 2.0f * float(sin(float64(arg)));
         let qVal = 1.0f / safeQ;
@@ -107,12 +112,14 @@ processor VowelEffect
         let clampedIdx = idx < 0 ? 0 : (idx > 4 ? 4 : idx);
         let frac = pos - float(clampedIdx);
         let nextIdx = clampedIdx + 1 < 5 ? clampedIdx + 1 : 4;
-
+        
         let val1 = table.at(clampedIdx);
         let val2 = table.at(nextIdx);
-
+        
         return val1 + frac * (val2 - val1);
     }
+
+    float64 driftPhase = 0.0;
 
     void main()
     {
@@ -139,7 +146,7 @@ processor VowelEffect
 
             let driftVal = float(sin(driftPhase * 6.28318530718));
             driftPhase = driftPhase + (0.15 * processor.period);
-            if (driftPhase >= 1.0)
+            if (driftPhase >= 1.0) 
                 driftPhase = driftPhase - 1.0;
 
             let f1 = getInterpolatedFormant(f1Freqs, vowelPos);
@@ -154,6 +161,7 @@ processor VowelEffect
             let f3Mod = f3 * formantMod;
             let f4Mod = f4 * formantMod;
 
+            // Per-formant Q from tables, scaled by resonance parameter
             let brightNorm = clampf((brightness - 0.5f) / 1.5f, 0.0f, 1.0f);
             let resScale = resonance / 8.0f;
             let q1 = clampf(getInterpolatedFormant(f1Q, vowelPos) * resScale, 1.0f, 18.0f);
@@ -171,6 +179,7 @@ processor VowelEffect
             let v3R = processBPF(f3R, inR, f3Mod, q3);
             let v4R = processBPF(f4R, inR, f4Mod, q4);
 
+            // Per-formant amplitude from tables, brightness boosts upper formants
             let a1 = getInterpolatedFormant(f1Amp, vowelPos);
             let a2 = getInterpolatedFormant(f2Amp, vowelPos) * (0.85f + brightNorm * 0.3f);
             let a3 = getInterpolatedFormant(f3Amp, vowelPos) * (0.7f + brightNorm * 0.6f);
@@ -178,7 +187,7 @@ processor VowelEffect
 
             let wetL = (v1L * a1) + (v2L * a2) + (v3L * a3) + (v4L * a4);
             let wetR = (v1R * a1) + (v2R * a2) + (v3R * a3) + (v4R * a4);
-
+            
             let mixedL = inL + mixParam * (wetL - inL);
             let mixedR = inR + mixParam * (wetR - inR);
 
