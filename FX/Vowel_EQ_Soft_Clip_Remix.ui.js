@@ -1,4 +1,4 @@
-/* UI remix change: compact 3-1-2 layout with param6 Soft Clip control. */
+/* UI remix change: staggered 2-2-2 layout with param6 Soft Clip control. */
 
 class FancyDial
 {
@@ -20,7 +20,6 @@ class FancyDial
         this.dragSource = "";
         this.startValue = this.value;
         this.startY = 0;
-
         this.onPointerDownBound = (event) => this.onPointerDown(event);
         this.onPointerMoveBound = (event) => this.onPointerMove(event);
         this.onPointerUpBound = (event) => this.onPointerUp(event);
@@ -28,7 +27,6 @@ class FancyDial
         this.onMouseMoveBound = (event) => this.onMouseMove(event);
         this.onMouseUpBound = (event) => this.onMouseUp(event);
         this.onDoubleClickBound = () => this.setValue(this.defaultValue, true);
-
         this.knob.addEventListener("pointerdown", this.onPointerDownBound);
         this.knob.addEventListener("pointermove", this.onPointerMoveBound);
         this.knob.addEventListener("pointerup", this.onPointerUpBound);
@@ -186,12 +184,12 @@ class VowelFancyDialsView extends HTMLElement
         this.patchConnection = patchConnection;
         this.controls = new Map();
         this.paramDefs = [
-            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot top-left palette-mint" },
-            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "slot top-center palette-violet" },
-            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot top-right palette-aqua" },
-            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "slot is-center center palette-amber" },
-            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "slot bottom-left palette-rose" },
-            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "slot bottom-right palette-lime" }
+            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot row1-left palette-mint" },
+            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot row1-right palette-aqua" },
+            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "slot row2-left palette-violet" },
+            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "slot is-center row2-right palette-amber" },
+            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "slot row3-left palette-rose" },
+            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "slot row3-right palette-lime" }
         ];
         this.paramListener = (event) => this.onParamEvent(event);
         this.attachShadow({ mode: "open" });
@@ -434,14 +432,14 @@ class VowelFancyDialsView extends HTMLElement
             .stage::after { content: ""; position: absolute; inset: 0; border-radius: 28px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 26px 56px rgba(0, 0, 0, 0.28); pointer-events: none; z-index: 2; }
             .view-badge { position: absolute; top: 14px; left: 16px; z-index: 4; padding: 7px 16px 8px; border-radius: 999px; border: 1px solid rgba(255, 180, 220, 0.4); background: rgba(20, 28, 42, 0.72); font-size: 14px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; line-height: 1; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 24px rgba(0, 0, 0, 0.24); pointer-events: none; }
             .view-badge span, .dial-label { background: linear-gradient(135deg, #ffb3d9, #ff8ec4, #c49fff, #8ecfff, #a3f7bf); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-            .rack { position: relative; z-index: 3; width: 760px; height: 520px; margin: 20px auto 0; }
+            .rack { position: relative; z-index: 3; width: 720px; height: 520px; margin: 20px auto 0; }
             .dial-card { --petal-a: #ffd38d; --petal-b: #f3a777; --petal-c: #fff0c4; --petal-glow: rgba(255, 202, 118, 0.42); position: absolute; width: 154px; display: grid; justify-items: center; gap: 7px; padding: 8px 8px 10px; transition: transform 120ms ease; }
-            .dial-card.top-left { left: 110px; top: 56px; }
-            .dial-card.top-center { left: 303px; top: 56px; }
-            .dial-card.top-right { left: 496px; top: 56px; }
-            .dial-card.center { left: 290px; top: 188px; width: 180px; z-index: 6; }
-            .dial-card.bottom-left { left: 225px; top: 378px; }
-            .dial-card.bottom-right { left: 415px; top: 378px; }
+            .dial-card.row1-left { left: 95px; top: 54px; }
+            .dial-card.row1-right { left: 500px; top: 54px; }
+            .dial-card.row2-left { left: 245px; top: 210px; }
+            .dial-card.row2-right { left: 475px; top: 184px; width: 180px; z-index: 6; }
+            .dial-card.row3-left { left: 80px; top: 382px; }
+            .dial-card.row3-right { left: 515px; top: 382px; }
             .dial-card.is-dragging { transform: translateY(-1px); }
             .palette-amber { --petal-a: #ffd693; --petal-b: #eea875; --petal-c: #fff2cb; --petal-glow: rgba(255, 203, 118, 0.42); }
             .palette-mint { --petal-a: #b1f1dc; --petal-b: #88d7ff; --petal-c: #ddfff6; --petal-glow: rgba(129, 233, 214, 0.4); }
@@ -486,7 +484,7 @@ class VowelFancyDialsView extends HTMLElement
 
 export default function createPatchView (patchConnection)
 {
-    const name = "vowel-eq-soft-clip-remix-v3";
+    const name = "vowel-eq-soft-clip-remix-v4";
     if (!window.customElements.get(name))
         window.customElements.define(name, VowelFancyDialsView);
     return new (window.customElements.get(name))(patchConnection);
