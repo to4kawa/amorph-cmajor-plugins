@@ -1,4 +1,4 @@
-/* UI remix change: adds param6 Soft Clip control for the DSP remix. */
+/* UI remix change: 3-1-2 layout with param6 Soft Clip control. */
 
 class FancyDial
 {
@@ -89,11 +89,7 @@ class FancyDial
         event.preventDefault();
         this.beginDrag("pointer", event.clientY, event.pointerId);
 
-        try
-        {
-            this.knob.setPointerCapture(event.pointerId);
-        }
-        catch (_) {}
+        try { this.knob.setPointerCapture(event.pointerId); } catch (_) {}
     }
 
     onPointerMove (event)
@@ -113,11 +109,7 @@ class FancyDial
         event.preventDefault();
         this.endDrag();
 
-        try
-        {
-            this.knob.releasePointerCapture(event.pointerId);
-        }
-        catch (_) {}
+        try { this.knob.releasePointerCapture(event.pointerId); } catch (_) {}
     }
 
     onMouseDown (event)
@@ -214,16 +206,15 @@ class VowelFancyDialsView extends HTMLElement
         this.controls = new Map();
 
         this.paramDefs = [
-            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "is-center pos-center palette-amber" },
-            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "orbit pos-top-left palette-mint" },
-            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "orbit pos-top-right palette-rose" },
-            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "orbit pos-bottom-left palette-aqua is-accent" },
-            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "orbit pos-bottom-right palette-violet is-accent" },
-            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "orbit pos-bottom-center palette-lime is-accent" }
+            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot top-left palette-mint" },
+            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "slot top-center palette-violet" },
+            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot top-right palette-aqua" },
+            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "slot is-center center palette-amber" },
+            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "slot bottom-left palette-rose" },
+            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "slot bottom-right palette-lime" }
         ];
 
         this.paramListener = (event) => this.onParamEvent(event);
-
         this.attachShadow({ mode: "open" });
         this.shadowRoot.innerHTML = this.render();
     }
@@ -406,9 +397,7 @@ class VowelFancyDialsView extends HTMLElement
         return `
             <div class="dial-card ${def.classes}" data-param="${def.id}">
                 <div class="dial-label">${def.label}</div>
-                <div class="dial-knob">
-                    ${this.renderKnobArt()}
-                </div>
+                <div class="dial-knob">${this.renderKnobArt()}</div>
                 <div class="dial-value">${def.valueText}</div>
             </div>`;
     }
@@ -417,20 +406,15 @@ class VowelFancyDialsView extends HTMLElement
     {
         const { cx, cy, radius, rotate, opacity, palette } = options;
         let petals = "";
-        const count = 5;
 
-        for (let i = 0; i < count; ++i)
+        for (let i = 0; i < 5; ++i)
         {
-            const angle = rotate + (360 / count) * i;
+            const angle = rotate + 72 * i;
             const fill = i % 2 === 0 ? palette.a : palette.b;
             petals += `<ellipse cx="${cx}" cy="${(cy - radius * 0.45).toFixed(2)}" rx="${(radius * 0.16).toFixed(2)}" ry="${(radius * 0.35).toFixed(2)}" fill="${fill}" fill-opacity="${opacity.toFixed(3)}" transform="rotate(${angle.toFixed(2)} ${cx} ${cy})"></ellipse>`;
         }
 
-        return `
-            <g>
-                ${petals}
-                <circle cx="${cx}" cy="${cy}" r="${(radius * 0.12).toFixed(2)}" fill="${palette.core}" fill-opacity="${(opacity * 1.5).toFixed(3)}"></circle>
-            </g>`;
+        return `<g>${petals}<circle cx="${cx}" cy="${cy}" r="${(radius * 0.12).toFixed(2)}" fill="${palette.core}" fill-opacity="${(opacity * 1.5).toFixed(3)}"></circle></g>`;
     }
 
     renderBackgroundArt ()
@@ -475,22 +459,13 @@ class VowelFancyDialsView extends HTMLElement
                 <rect x="0" y="0" width="980" height="560" rx="28" fill="url(#glow-gold)"></rect>
                 <rect x="0" y="0" width="980" height="560" rx="28" fill="url(#glow-plum)"></rect>
                 <rect x="0" y="0" width="980" height="560" rx="28" fill="url(#glow-teal)"></rect>
-
                 <g fill="none" stroke="#ffffff" stroke-opacity="0.055">
                     <circle cx="490" cy="284" r="118"></circle>
                     <circle cx="490" cy="284" r="174"></circle>
                     <circle cx="490" cy="284" r="236"></circle>
                     <circle cx="490" cy="284" r="304"></circle>
                 </g>
-
-                <g fill="none" stroke="#ffffff" stroke-opacity="0.03">
-                    <circle cx="180" cy="290" r="186"></circle>
-                    <circle cx="806" cy="320" r="218"></circle>
-                </g>
-
-                <g>
-                    ${blooms.map((bloom) => this.renderBackgroundBloom(bloom)).join("")}
-                </g>
+                <g>${blooms.map((bloom) => this.renderBackgroundBloom(bloom)).join("")}</g>
             </svg>`;
     }
 
@@ -549,9 +524,7 @@ class VowelFancyDialsView extends HTMLElement
                 inset: 0;
                 border-radius: 28px;
                 border: 1px solid rgba(255, 255, 255, 0.08);
-                box-shadow:
-                    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-                    0 26px 56px rgba(0, 0, 0, 0.28);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 26px 56px rgba(0, 0, 0, 0.28);
                 pointer-events: none;
                 z-index: 2;
             }
@@ -570,14 +543,11 @@ class VowelFancyDialsView extends HTMLElement
                 letter-spacing: 0.12em;
                 text-transform: uppercase;
                 line-height: 1;
-                background-clip: padding-box;
-                box-shadow:
-                    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-                    0 10px 24px rgba(0, 0, 0, 0.24);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 24px rgba(0, 0, 0, 0.24);
                 pointer-events: none;
             }
 
-            .view-badge span {
+            .view-badge span, .dial-label {
                 background: linear-gradient(135deg, #ffb3d9, #ff8ec4, #c49fff, #8ecfff, #a3f7bf);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
@@ -587,7 +557,7 @@ class VowelFancyDialsView extends HTMLElement
             .rack {
                 position: relative;
                 z-index: 3;
-                width: 720px;
+                width: 760px;
                 height: 520px;
                 margin: 20px auto 0;
             }
@@ -598,113 +568,37 @@ class VowelFancyDialsView extends HTMLElement
                 --petal-c: #fff0c4;
                 --petal-glow: rgba(255, 202, 118, 0.42);
                 position: absolute;
-                left: 360px;
-                top: 245px;
                 transform: translate(-50%, -50%);
                 width: 154px;
                 display: grid;
                 justify-items: center;
-                gap: 10px;
-                padding: 14px 12px 14px;
-                border-radius: 28px;
-                border: none;
-                background: none;
-                box-shadow: none;
+                gap: 9px;
+                padding: 10px 10px 12px;
                 transition: transform 120ms ease;
             }
+
+            .dial-card.top-left { left: 150px; top: 118px; }
+            .dial-card.top-center { left: 380px; top: 118px; }
+            .dial-card.top-right { left: 610px; top: 118px; }
+            .dial-card.center { left: 380px; top: 286px; }
+            .dial-card.bottom-left { left: 250px; top: 442px; }
+            .dial-card.bottom-right { left: 510px; top: 442px; }
 
             .dial-card.is-center {
                 width: 236px;
                 z-index: 6;
-                padding: 18px 16px 18px;
-                border: none;
-                background: none;
-                box-shadow: none;
-            }
-
-            .dial-card.pos-top-left {
-                left: 140px;
-                top: 115px;
-            }
-
-            .dial-card.pos-top-right {
-                left: 580px;
-                top: 115px;
-            }
-
-            .dial-card.pos-bottom-left {
-                left: 140px;
-                top: 385px;
-            }
-
-            .dial-card.pos-bottom-right {
-                left: 580px;
-                top: 385px;
-            }
-
-            .dial-card.pos-bottom-center {
-                left: 360px;
-                top: 454px;
-            }
-
-            .palette-amber {
-                --petal-a: #ffd693;
-                --petal-b: #eea875;
-                --petal-c: #fff2cb;
-                --petal-glow: rgba(255, 203, 118, 0.42);
-            }
-
-            .palette-mint {
-                --petal-a: #b1f1dc;
-                --petal-b: #88d7ff;
-                --petal-c: #ddfff6;
-                --petal-glow: rgba(129, 233, 214, 0.4);
-            }
-
-            .palette-rose {
-                --petal-a: #ffcca2;
-                --petal-b: #e18ab0;
-                --petal-c: #ffe6d7;
-                --petal-glow: rgba(244, 173, 156, 0.38);
-            }
-
-            .palette-aqua {
-                --petal-a: #9ad9ff;
-                --petal-b: #78e4c8;
-                --petal-c: #daf6ff;
-                --petal-glow: rgba(121, 225, 242, 0.38);
-            }
-
-            .palette-violet {
-                --petal-a: #d3c7ff;
-                --petal-b: #8ebcff;
-                --petal-c: #efeaff;
-                --petal-glow: rgba(192, 186, 255, 0.4);
-            }
-
-            .palette-lime {
-                --petal-a: #d7ff9a;
-                --petal-b: #a3f7bf;
-                --petal-c: #f0ffd0;
-                --petal-glow: rgba(184, 245, 141, 0.42);
             }
 
             .dial-card.is-dragging {
                 transform: translate(-50%, -51%);
             }
 
-            .dial-card.is-accent .dial-knob {
-                box-shadow:
-                    0 16px 28px rgba(0, 0, 0, 0.46),
-                    0 0 0 1.5px rgba(255, 255, 255, 0.12),
-                    0 0 18px var(--petal-glow),
-                    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-                    inset 0 -8px 12px rgba(1, 7, 14, 0.86);
-            }
-
-            .dial-card.is-accent .dial-label {
-                font-size: 19px;
-            }
+            .palette-amber { --petal-a: #ffd693; --petal-b: #eea875; --petal-c: #fff2cb; --petal-glow: rgba(255, 203, 118, 0.42); }
+            .palette-mint { --petal-a: #b1f1dc; --petal-b: #88d7ff; --petal-c: #ddfff6; --petal-glow: rgba(129, 233, 214, 0.4); }
+            .palette-rose { --petal-a: #ffcca2; --petal-b: #e18ab0; --petal-c: #ffe6d7; --petal-glow: rgba(244, 173, 156, 0.38); }
+            .palette-aqua { --petal-a: #9ad9ff; --petal-b: #78e4c8; --petal-c: #daf6ff; --petal-glow: rgba(121, 225, 242, 0.38); }
+            .palette-violet { --petal-a: #d3c7ff; --petal-b: #8ebcff; --petal-c: #efeaff; --petal-glow: rgba(192, 186, 255, 0.4); }
+            .palette-lime { --petal-a: #d7ff9a; --petal-b: #a3f7bf; --petal-c: #f0ffd0; --petal-glow: rgba(184, 245, 141, 0.42); }
 
             .dial-label {
                 font-size: 18px;
@@ -713,19 +607,12 @@ class VowelFancyDialsView extends HTMLElement
                 text-transform: uppercase;
                 line-height: 1;
                 white-space: nowrap;
-                padding: 8px 18px;
-                border-radius: 999px;
-                border: none;
-                background: linear-gradient(135deg, #ffb3d9, #ff8ec4, #c49fff, #8ecfff, #a3f7bf);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                background-clip: text;
-                box-shadow: none;
+                padding: 6px 14px;
             }
 
             .dial-card.is-center .dial-label {
                 font-size: 28px;
-                padding: 10px 24px;
+                padding: 8px 22px;
             }
 
             .dial-knob {
@@ -733,100 +620,39 @@ class VowelFancyDialsView extends HTMLElement
                 --angle: -140deg;
                 --glow: 0.3;
                 position: relative;
-                width: 92px;
-                height: 92px;
+                width: 88px;
+                height: 88px;
                 border-radius: 50%;
                 touch-action: none;
                 cursor: ns-resize;
-                background:
-                    radial-gradient(circle at 36% 30%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 28%),
-                    radial-gradient(circle at 52% 54%, rgba(27, 38, 57, 0.94) 0%, rgba(12, 20, 31, 0.98) 66%, rgba(5, 10, 17, 1.0) 100%);
-                box-shadow:
-                    0 16px 28px rgba(0, 0, 0, 0.46),
-                    0 0 0 1px rgba(255, 255, 255, 0.08),
-                    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-                    inset 0 -8px 12px rgba(1, 7, 14, 0.86);
+                background: radial-gradient(circle at 36% 30%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 28%), radial-gradient(circle at 52% 54%, rgba(27, 38, 57, 0.94) 0%, rgba(12, 20, 31, 0.98) 66%, rgba(5, 10, 17, 1.0) 100%);
+                box-shadow: 0 16px 28px rgba(0, 0, 0, 0.46), 0 0 0 1px rgba(255, 255, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -8px 12px rgba(1, 7, 14, 0.86);
                 transition: transform 100ms ease, box-shadow 140ms ease;
             }
 
             .dial-card.is-center .dial-knob {
-                width: 150px;
-                height: 150px;
+                width: 142px;
+                height: 142px;
             }
 
             .dial-card.is-dragging .dial-knob {
                 transform: translateY(-1px) scale(1.035);
-                box-shadow:
-                    0 18px 32px rgba(0, 0, 0, 0.5),
-                    0 0 18px rgba(255, 255, 255, 0.04),
-                    0 0 22px var(--petal-glow),
-                    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-                    inset 0 -8px 12px rgba(1, 7, 14, 0.86);
+                box-shadow: 0 18px 32px rgba(0, 0, 0, 0.5), 0 0 22px var(--petal-glow), inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -8px 12px rgba(1, 7, 14, 0.86);
             }
 
-            .dial-ornament {
-                position: absolute;
-                inset: 8%;
-                pointer-events: none;
-            }
-
-            .dial-ornament-svg {
-                width: 100%;
-                height: 100%;
-                display: block;
-                overflow: visible;
-            }
-
-            .dial-ornament-svg .ring-shadow {
-                fill: none;
-                stroke: rgba(255, 255, 255, 0.04);
-                stroke-width: 6;
-            }
-
-            .dial-ornament-svg .petal {
-                stroke: none;
-            }
-
-            .dial-ornament-svg .petal.is-a {
-                fill: var(--petal-a);
-            }
-
-            .dial-ornament-svg .petal.is-b {
-                fill: var(--petal-b);
-            }
-
-            .dial-ornament-svg .petal.is-c {
-                fill: var(--petal-c);
-            }
-
-            .dial-ornament-svg .petal-set-outer {
-                opacity: calc(0.14 + var(--glow) * 0.46);
-            }
-
-            .dial-ornament-svg .petal-set-inner {
-                opacity: calc(0.12 + var(--glow) * 0.34);
-            }
-
-            .dial-ornament-svg .ring {
-                fill: none;
-            }
-
-            .dial-ornament-svg .ring-outer {
-                stroke: rgba(255, 255, 255, 0.08);
-                stroke-width: 2.4;
-            }
-
-            .dial-ornament-svg .ring-mid {
-                stroke: var(--petal-c);
-                stroke-width: 3.6;
-                opacity: calc(0.18 + var(--glow) * 0.52);
-            }
-
-            .dial-ornament-svg .ring-core {
-                stroke: var(--petal-b);
-                stroke-width: 2.8;
-                opacity: calc(0.2 + var(--glow) * 0.42);
-            }
+            .dial-ornament { position: absolute; inset: 8%; pointer-events: none; }
+            .dial-ornament-svg { width: 100%; height: 100%; display: block; overflow: visible; }
+            .ring-shadow { fill: none; stroke: rgba(255, 255, 255, 0.04); stroke-width: 6; }
+            .petal { stroke: none; }
+            .petal.is-a { fill: var(--petal-a); }
+            .petal.is-b { fill: var(--petal-b); }
+            .petal.is-c { fill: var(--petal-c); }
+            .petal-set-outer { opacity: calc(0.14 + var(--glow) * 0.46); }
+            .petal-set-inner { opacity: calc(0.12 + var(--glow) * 0.34); }
+            .ring { fill: none; }
+            .ring-outer { stroke: rgba(255, 255, 255, 0.08); stroke-width: 2.4; }
+            .ring-mid { stroke: var(--petal-c); stroke-width: 3.6; opacity: calc(0.18 + var(--glow) * 0.52); }
+            .ring-core { stroke: var(--petal-b); stroke-width: 2.8; opacity: calc(0.2 + var(--glow) * 0.42); }
 
             .dial-pointer {
                 position: absolute;
@@ -838,9 +664,7 @@ class VowelFancyDialsView extends HTMLElement
                 transform: translate(-50%, -100%) rotate(var(--angle));
                 transform-origin: 50% 100%;
                 background: linear-gradient(180deg, rgba(246, 255, 231, 0.98), rgba(161, 213, 129, 0.96) 34%, rgba(79, 136, 62, 0.96) 100%);
-                box-shadow:
-                    0 0 0 1px rgba(16, 44, 24, 0.48),
-                    0 0 8px rgba(196, 236, 170, 0.36);
+                box-shadow: 0 0 0 1px rgba(16, 44, 24, 0.48), 0 0 8px rgba(196, 236, 170, 0.36);
                 pointer-events: none;
             }
 
@@ -854,9 +678,7 @@ class VowelFancyDialsView extends HTMLElement
                 transform: translate(-50%, -50%);
                 border: 1px solid rgba(110, 77, 18, 0.7);
                 background: radial-gradient(circle at 34% 30%, rgba(255, 248, 205, 1), rgba(255, 205, 94, 0.98) 48%, rgba(190, 126, 45, 0.98) 100%);
-                box-shadow:
-                    0 0 0 2px rgba(255, 245, 199, 0.2),
-                    0 0 12px rgba(255, 204, 108, 0.34);
+                box-shadow: 0 0 0 2px rgba(255, 245, 199, 0.2), 0 0 12px rgba(255, 204, 108, 0.34);
                 pointer-events: none;
             }
 
@@ -873,9 +695,7 @@ class VowelFancyDialsView extends HTMLElement
                 font-size: 20px;
                 font-weight: 780;
                 letter-spacing: 0.03em;
-                box-shadow:
-                    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                    0 6px 16px rgba(0, 0, 0, 0.18);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 6px 16px rgba(0, 0, 0, 0.18);
             }
 
             .dial-card.is-center .dial-value {
@@ -902,7 +722,7 @@ class VowelFancyDialsView extends HTMLElement
 
 export default function createPatchView (patchConnection)
 {
-    const name = "vowel-eq-soft-clip-remix-v1";
+    const name = "vowel-eq-soft-clip-remix-v2";
 
     if (!window.customElements.get(name))
         window.customElements.define(name, VowelFancyDialsView);
