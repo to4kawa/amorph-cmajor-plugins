@@ -1,4 +1,4 @@
-/* UI remix change: staggered 2-2-2 layout with param6 Soft Clip control. */
+/* UI remix change: left-to-right 2-2-1-1 column layout with param6 Soft Clip control. */
 
 class FancyDial
 {
@@ -16,10 +16,11 @@ class FancyDial
         this.formatValue = options.formatValue;
         this.value = this.defaultValue;
         this.dragging = false;
-        this.pointerId = -1;
         this.dragSource = "";
+        this.pointerId = -1;
         this.startValue = this.value;
         this.startY = 0;
+
         this.onPointerDownBound = (event) => this.onPointerDown(event);
         this.onPointerMoveBound = (event) => this.onPointerMove(event);
         this.onPointerUpBound = (event) => this.onPointerUp(event);
@@ -27,12 +28,14 @@ class FancyDial
         this.onMouseMoveBound = (event) => this.onMouseMove(event);
         this.onMouseUpBound = (event) => this.onMouseUp(event);
         this.onDoubleClickBound = () => this.setValue(this.defaultValue, true);
+
         this.knob.addEventListener("pointerdown", this.onPointerDownBound);
         this.knob.addEventListener("pointermove", this.onPointerMoveBound);
         this.knob.addEventListener("pointerup", this.onPointerUpBound);
         this.knob.addEventListener("pointercancel", this.onPointerUpBound);
         this.knob.addEventListener("mousedown", this.onMouseDownBound);
         this.knob.addEventListener("dblclick", this.onDoubleClickBound);
+
         this.updateVisuals();
     }
 
@@ -44,6 +47,7 @@ class FancyDial
         this.knob.removeEventListener("pointercancel", this.onPointerUpBound);
         this.knob.removeEventListener("mousedown", this.onMouseDownBound);
         this.knob.removeEventListener("dblclick", this.onDoubleClickBound);
+
         if (typeof window !== "undefined")
         {
             window.removeEventListener("mousemove", this.onMouseMoveBound, true);
@@ -56,6 +60,7 @@ class FancyDial
         const next = this.clamp(this.quantize(value), this.min, this.max);
         this.value = next;
         this.updateVisuals();
+
         if (notify && typeof this.onValue === "function")
             this.onValue(this.param, this.value);
     }
@@ -66,9 +71,11 @@ class FancyDial
         const norm = this.clamp((this.value - this.min) / range, 0.0, 1.0);
         const angle = -140.0 + norm * 280.0;
         const glow = 0.24 + norm * 0.52;
+
         this.knob.style.setProperty("--norm", `${norm}`);
         this.knob.style.setProperty("--angle", `${angle}deg`);
         this.knob.style.setProperty("--glow", `${glow}`);
+
         if (this.valueNode)
             this.valueNode.textContent = this.formatValue(this.param, this.value);
     }
@@ -77,6 +84,7 @@ class FancyDial
     {
         if (this.dragging || (event.button !== undefined && event.button !== 0) || event.isPrimary === false)
             return;
+
         event.preventDefault();
         this.beginDrag("pointer", event.clientY, event.pointerId);
         try { this.knob.setPointerCapture(event.pointerId); } catch (_) {}
@@ -86,6 +94,7 @@ class FancyDial
     {
         if (!this.dragging || this.dragSource !== "pointer" || event.pointerId !== this.pointerId)
             return;
+
         event.preventDefault();
         this.updateDrag(event.clientY, event.shiftKey);
     }
@@ -94,6 +103,7 @@ class FancyDial
     {
         if (!this.dragging || this.dragSource !== "pointer" || event.pointerId !== this.pointerId)
             return;
+
         event.preventDefault();
         this.endDrag();
         try { this.knob.releasePointerCapture(event.pointerId); } catch (_) {}
@@ -103,8 +113,10 @@ class FancyDial
     {
         if (this.dragging || (event.button !== undefined && event.button !== 0))
             return;
+
         event.preventDefault();
         this.beginDrag("mouse", event.clientY, -1);
+
         if (typeof window !== "undefined")
         {
             window.addEventListener("mousemove", this.onMouseMoveBound, true);
@@ -116,6 +128,7 @@ class FancyDial
     {
         if (!this.dragging || this.dragSource !== "mouse")
             return;
+
         event.preventDefault();
         this.updateDrag(event.clientY, event.shiftKey);
     }
@@ -124,8 +137,10 @@ class FancyDial
     {
         if (!this.dragging || this.dragSource !== "mouse")
             return;
+
         event.preventDefault();
         this.endDrag();
+
         if (typeof window !== "undefined")
         {
             window.removeEventListener("mousemove", this.onMouseMoveBound, true);
@@ -164,6 +179,7 @@ class FancyDial
     {
         if (!Number.isFinite(this.step) || this.step <= 0.0)
             return value;
+
         const steps = Math.round((value - this.min) / this.step);
         return this.min + steps * this.step;
     }
@@ -172,6 +188,7 @@ class FancyDial
     {
         if (!Number.isFinite(value))
             return min;
+
         return Math.max(min, Math.min(max, value));
     }
 }
@@ -181,16 +198,19 @@ class VowelFancyDialsView extends HTMLElement
     constructor (patchConnection)
     {
         super();
+
         this.patchConnection = patchConnection;
         this.controls = new Map();
+
         this.paramDefs = [
-            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot row1-left palette-mint" },
-            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot row1-right palette-aqua" },
-            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "slot row2-left palette-violet" },
-            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "slot is-center row2-right palette-amber" },
-            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "slot row3-left palette-rose" },
-            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "slot row3-right palette-lime" }
+            { id: "param2", label: "Brightness", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot col1-top palette-mint" },
+            { id: "param4", label: "Dry/Wet", min: 0.0, max: 1.0, step: 0.01, init: 0.5, valueText: "50%", classes: "slot col1-bottom palette-rose" },
+            { id: "param3", label: "Resonance", min: 3.5, max: 20.0, step: 0.1, init: 8.0, valueText: "8.0", classes: "slot col2-top palette-violet" },
+            { id: "param5", label: "Pitch", min: 0.5, max: 2.0, step: 0.01, init: 1.0, valueText: "1.00", classes: "slot col2-bottom palette-aqua" },
+            { id: "param1", label: "Vowel", min: 0.0, max: 4.0, step: 0.01, init: 0.0, valueText: "a", classes: "slot is-center col3-center palette-amber" },
+            { id: "param6", label: "Soft Clip", min: 0.0, max: 1.0, step: 0.01, init: 0.0, valueText: "0%", classes: "slot col4-center palette-lime" }
         ];
+
         this.paramListener = (event) => this.onParamEvent(event);
         this.attachShadow({ mode: "open" });
         this.shadowRoot.innerHTML = this.render();
@@ -199,8 +219,10 @@ class VowelFancyDialsView extends HTMLElement
     connectedCallback ()
     {
         this.setupControls();
+
         if (this.patchConnection && typeof this.patchConnection.addAllParameterListener === "function")
             this.patchConnection.addAllParameterListener(this.paramListener);
+
         this.requestInitialValues();
     }
 
@@ -208,24 +230,29 @@ class VowelFancyDialsView extends HTMLElement
     {
         if (this.patchConnection && typeof this.patchConnection.removeAllParameterListener === "function")
             this.patchConnection.removeAllParameterListener(this.paramListener);
+
         for (const control of this.controls.values())
             control.destroy();
+
         this.controls.clear();
     }
 
     setupControls ()
     {
         const nodes = this.shadowRoot.querySelectorAll(".dial-card");
+
         for (const node of nodes)
         {
             const id = String(node.getAttribute("data-param") || "");
             const def = this.paramDefs.find((entry) => entry.id === id);
             if (!def)
                 continue;
+
             const knob = node.querySelector(".dial-knob");
             const valueNode = node.querySelector(".dial-value");
             if (!knob)
                 continue;
+
             const control = new FancyDial({
                 param: id,
                 node,
@@ -238,6 +265,7 @@ class VowelFancyDialsView extends HTMLElement
                 onValue: (param, value) => this.sendParamValue(param, value),
                 formatValue: (param, value) => this.formatValue(param, value)
             });
+
             control.setValue(def.init, false);
             this.controls.set(id, control);
         }
@@ -247,6 +275,7 @@ class VowelFancyDialsView extends HTMLElement
     {
         if (!this.patchConnection || typeof this.patchConnection.requestParameterValue !== "function")
             return;
+
         for (const def of this.paramDefs)
             this.patchConnection.requestParameterValue(def.id);
     }
@@ -255,15 +284,19 @@ class VowelFancyDialsView extends HTMLElement
     {
         if (!event)
             return;
+
         const id = typeof event.endpointID === "string" ? event.endpointID : "";
         if (!id)
             return;
+
         const control = this.controls.get(id);
         if (!control || control.dragging)
             return;
+
         const value = Number(event.value);
         if (!Number.isFinite(value))
             return;
+
         control.setValue(value, false);
     }
 
@@ -271,6 +304,7 @@ class VowelFancyDialsView extends HTMLElement
     {
         if (!this.patchConnection)
             return;
+
         try
         {
             if (typeof this.patchConnection.sendEventOrValue === "function")
@@ -280,6 +314,7 @@ class VowelFancyDialsView extends HTMLElement
             }
         }
         catch (_) {}
+
         try
         {
             if (typeof this.patchConnection.sendParameterValue === "function")
@@ -289,6 +324,7 @@ class VowelFancyDialsView extends HTMLElement
             }
         }
         catch (_) {}
+
         try
         {
             if (typeof this.patchConnection.sendEvent === "function")
@@ -301,28 +337,34 @@ class VowelFancyDialsView extends HTMLElement
     {
         if (!Number.isFinite(value))
             return "0";
+
         if (id === "param1")
         {
             const vowels = ["a", "e", "i", "o", "u"];
             const index = Math.max(0, Math.min(4, Math.round(value)));
             return vowels[index];
         }
+
         if (id === "param4" || id === "param6")
             return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+
         if (id === "param3")
             return value.toFixed(1);
+
         return value.toFixed(2);
     }
 
     renderPetalSet (count, radius, rx, ry, className)
     {
         let markup = "";
+
         for (let index = 0; index < count; ++index)
         {
             const angle = (360 / count) * index;
             const variant = index % 3 === 0 ? "is-c" : (index % 2 === 0 ? "is-a" : "is-b");
             markup += `<ellipse class="${className} ${variant}" cx="50" cy="${(50 - radius).toFixed(2)}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(2)}" transform="rotate(${angle.toFixed(2)} 50 50)"></ellipse>`;
         }
+
         return markup;
     }
 
@@ -361,12 +403,14 @@ class VowelFancyDialsView extends HTMLElement
     {
         const { cx, cy, radius, rotate, opacity, palette } = options;
         let petals = "";
+
         for (let i = 0; i < 5; ++i)
         {
             const angle = rotate + 72 * i;
             const fill = i % 2 === 0 ? palette.a : palette.b;
             petals += `<ellipse cx="${cx}" cy="${(cy - radius * 0.45).toFixed(2)}" rx="${(radius * 0.16).toFixed(2)}" ry="${(radius * 0.35).toFixed(2)}" fill="${fill}" fill-opacity="${opacity.toFixed(3)}" transform="rotate(${angle.toFixed(2)} ${cx} ${cy})"></ellipse>`;
         }
+
         return `<g>${petals}<circle cx="${cx}" cy="${cy}" r="${(radius * 0.12).toFixed(2)}" fill="${palette.core}" fill-opacity="${(opacity * 1.5).toFixed(3)}"></circle></g>`;
     }
 
@@ -380,6 +424,7 @@ class VowelFancyDialsView extends HTMLElement
             { cx: 490, cy: 30, radius: 82, rotate: 5, opacity: 0.20, palette: { a: "#e8b8ff", b: "#c49fff", core: "#efe0ff" } },
             { cx: 490, cy: 535, radius: 80, rotate: 25, opacity: 0.20, palette: { a: "#ffb8d4", b: "#ff90c0", core: "#ffd0e4" } }
         ];
+
         return `
             <svg class="bg-art" viewBox="0 0 980 560" preserveAspectRatio="none" aria-hidden="true">
                 <defs>
@@ -432,15 +477,15 @@ class VowelFancyDialsView extends HTMLElement
             .stage::after { content: ""; position: absolute; inset: 0; border-radius: 28px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 26px 56px rgba(0, 0, 0, 0.28); pointer-events: none; z-index: 2; }
             .view-badge { position: absolute; top: 14px; left: 16px; z-index: 4; padding: 7px 16px 8px; border-radius: 999px; border: 1px solid rgba(255, 180, 220, 0.4); background: rgba(20, 28, 42, 0.72); font-size: 14px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; line-height: 1; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 24px rgba(0, 0, 0, 0.24); pointer-events: none; }
             .view-badge span, .dial-label { background: linear-gradient(135deg, #ffb3d9, #ff8ec4, #c49fff, #8ecfff, #a3f7bf); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-            .rack { position: relative; z-index: 3; width: 720px; height: 520px; margin: 20px auto 0; }
-            .dial-card { --petal-a: #ffd38d; --petal-b: #f3a777; --petal-c: #fff0c4; --petal-glow: rgba(255, 202, 118, 0.42); position: absolute; width: 154px; display: grid; justify-items: center; gap: 7px; padding: 8px 8px 10px; transition: transform 120ms ease; }
-            .dial-card.row1-left { left: 95px; top: 54px; }
-            .dial-card.row1-right { left: 500px; top: 54px; }
-            .dial-card.row2-left { left: 245px; top: 210px; }
-            .dial-card.row2-right { left: 475px; top: 184px; width: 180px; z-index: 6; }
-            .dial-card.row3-left { left: 80px; top: 382px; }
-            .dial-card.row3-right { left: 515px; top: 382px; }
-            .dial-card.is-dragging { transform: translateY(-1px); }
+            .rack { position: relative; z-index: 3; width: 900px; height: 520px; margin: 20px auto 0; }
+            .dial-card { --petal-a: #ffd38d; --petal-b: #f3a777; --petal-c: #fff0c4; --petal-glow: rgba(255, 202, 118, 0.42); position: absolute; width: 154px; display: grid; justify-items: center; gap: 7px; padding: 8px 8px 10px; transform: translate(-50%, -50%); transition: transform 120ms ease; }
+            .dial-card.col1-top { left: 150px; top: 150px; }
+            .dial-card.col1-bottom { left: 150px; top: 340px; }
+            .dial-card.col2-top { left: 380px; top: 180px; }
+            .dial-card.col2-bottom { left: 380px; top: 365px; }
+            .dial-card.col3-center { left: 610px; top: 275px; width: 180px; z-index: 6; }
+            .dial-card.col4-center { left: 800px; top: 320px; }
+            .dial-card.is-dragging { transform: translate(-50%, -51%); }
             .palette-amber { --petal-a: #ffd693; --petal-b: #eea875; --petal-c: #fff2cb; --petal-glow: rgba(255, 203, 118, 0.42); }
             .palette-mint { --petal-a: #b1f1dc; --petal-b: #88d7ff; --petal-c: #ddfff6; --petal-glow: rgba(129, 233, 214, 0.4); }
             .palette-rose { --petal-a: #ffcca2; --petal-b: #e18ab0; --petal-c: #ffe6d7; --petal-glow: rgba(244, 173, 156, 0.38); }
@@ -484,8 +529,10 @@ class VowelFancyDialsView extends HTMLElement
 
 export default function createPatchView (patchConnection)
 {
-    const name = "vowel-eq-soft-clip-remix-v4";
+    const name = "vowel-eq-soft-clip-remix-v5";
+
     if (!window.customElements.get(name))
         window.customElements.define(name, VowelFancyDialsView);
+
     return new (window.customElements.get(name))(patchConnection);
 }
